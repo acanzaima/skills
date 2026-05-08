@@ -72,6 +72,14 @@ const appStore = useAppStoreWithOut() // 可以工作但不必要
 </script>
 ```
 
+> ⚠️ **常见误用警告**：在 `<script setup>` 内使用 `useXxxStoreWithOut()` **不会报错**（因为 pinia 实例确实存在），所以这种误用非常隐蔽。但它绕过了 Vue 的 `inject`/`provide` 依赖注入体系，会导致以下问题：
+>
+> - **SSR 场景下状态污染**：`useAppStoreWithOut()` 始终返回同一个全局 pinia 实例，而 `useAppStore()` 会通过 `inject` 获取当前请求级别的实例，避免服务端渲染时的跨请求状态泄露
+> - **测试时无法隔离**：单元测试中无法通过 `setActivePinia(createPinia())` 替换 store——`WithOut` 版本硬编码了全局实例，绕过了测试隔离机制
+> - **组件复用性降低**：如果组件被嵌入到另一个 pinia 实例的应用中（如微前端场景），`WithOut` 会连接到错误的 store
+>
+> **记住**：`WithOut` 的后缀字面意思就是"在没有组件上下文的地方使用"。如果你在 `<script setup>` 里——你有上下文，就别用 `WithOut`。
+
 ### 在 Hooks / Utils / Plugins 中（必须使用 WithOut）
 
 ```typescript

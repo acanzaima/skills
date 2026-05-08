@@ -328,6 +328,8 @@ function useSearchInput() {
 </script>
 ```
 
+> **大型组件提示**：当 `useXxx` 超过 8 个时，声明区的依赖传参会变得冗长。参考[跨功能依赖 - 模式 6](cross-feature-dependencies.md#模式-6页面级编排混合策略)的混合策略：核心数据链走显式参数注入，叶子函数可容忍闭包，避免声明区沦为样板代码的海洋。
+
 ## 参考
 
 - [Vue.js Composition API FAQ](https://vuejs.org/guide/extras/composition-api-faq.html)

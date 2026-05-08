@@ -424,6 +424,203 @@ const { submit, isSubmitting } = useFormSubmit({
 </script>
 ```
 
+### 模式 6：页面级编排（混合策略）
+
+**影响级别：MEDIUM** — 当页面组件有 8 个以上 `useXxx` 函数时，全部走参数注入会让声明区冗长，但全部靠闭包又会回到隐式依赖的混乱。需要一个"核心链显式 + 叶子函数宽松"的混合策略。
+
+**问题所在：两种极端**
+
+**极端一：全部闭包 — 隐式依赖不可见**
+
+```vue
+<script setup lang="ts">
+// ❌ 10+ 个 useXxx 全部通过闭包互相引用
+
+// usePagination 里调了 handleSearch——handleSearch 是哪来的？
+function usePagination() {
+  const onPageChange = () => {
+    handleSearch() // 闭包引用——来自 useSearchForm，但完全不可见
+  }
+  return { onPageChange }
+}
+
+// useSearchForm 里引了 pageInfo、getTableList——在哪定义的？
+function useSearchForm() {
+  const queryParams = computed(() => ({
+    pageNo: pageInfo.pageNo,  // 闭包引用
+    pageSize: pageInfo.pageSize,
+  }))
+  const handleSearch = () => {
+    getTableList(queryParams.value) // 闭包引用
+  }
+  return { handleSearch }
+}
+
+// ... 还有 8 个类似的函数，依赖关系需要逐行往上翻才能搞清
+</script>
+```
+
+**极端二：全部参数注入 — 声明区过于冗长**
+
+```vue
+<script setup lang="ts">
+// ❌ 每个函数都传 3~4 个依赖参数，声明区变成样板代码的海洋
+const { dataSource, getTableList } = useTableList()
+const { pageInfo, resetPageIndex } = usePagination()
+const { handleSearch } = useSearchForm({ getTableList, pageInfo, resetPageIndex })
+const { openRegisModal } = useRegisModal({ handleSearch })
+const { openOperationModal } = useOperationModal({ handleSearch })
+const { openPreviewModal } = usePreviewModal({ handleSearch })
+const { openOpsPreviewModal } = useOpsPreviewModal({ handleSearch })
+const { openApprovalModal } = useApprovalModal({ handleSearch })
+const { openOpsApprovalModal } = useOpsApprovalModal({ handleSearch })
+const { openApprovalInfoModal } = useApprovalInfoModal()
+const { openOpsApprovalInfoModal } = useOpsApprovalInfoModal()
+// handleSearch 重复传了 6 次——为了规范而规范，收益递减
+</script>
+```
+
+**GOOD — 混合策略：核心链显式注入 + 叶子闭包**
+
+```vue
+<script setup lang="ts">
+// ============ 功能声明 ============
+
+// Step 1：底层能力先声明
+const { dataSource, loading, columns, getTableList } = useTableList()
+
+// Step 2：核心链上的函数——依赖通过参数显式传入
+const { pageInfo, resetPageIndex, updatePageTotal } = usePagination()
+
+const { searchForm, handleSearch, resetForm } = useSearchForm({
+  getPageInfo: () => ({ pageNo: pageInfo.pageNo, pageSize: pageInfo.pageSize }),
+  getTableList,
+  resetPageIndex,
+})
+
+// Step 3：分页事件绑定核心函数
+const { onPageChange } = usePaginationEvent({
+  onPageChange: () => handleSearch(),
+})
+
+// Step 4：叶子函数——对 handleSearch 的调用可容忍闭包
+// 原因：它们都是一对一的关系（按钮点击 → 刷新列表），语义统一，不会混乱
+const { regisApplyModalRef, openRegisModal, submitData } = useRegisModal()
+const { regisPreviewModalRef, openPreviewModal, submitRegisApply } = usePreviewModal()
+const { operationApplyModalRef, openOperationModal, submitOperation } = useOperationModal()
+const { opsPreviewModalRef, openOpsPreviewModal, submitOpsApply } = useOpsPreviewModal()
+const { approvalModalRef, openApprovalModal, submitApproval } = useApprovalModal()
+const { opsApprovalModalRef, openOpsApprovalModal, submitOpsApproval } = useOpsApprovalModal()
+const { approvalInfoModalRef, openApprovalInfoModal } = useApprovalInfoModal()
+const { opsApprovalInfoModalRef, openOpsApprovalInfoModal } = useOpsApprovalInfoModal()
+
+// ============ 功能实现 ============
+
+function useTableList() {
+  const loading = ref(false)
+  const dataSource = ref([])
+
+  const getTableList = (params) => {
+    loading.value = true
+    fetchData(params)
+      .then((res) => { dataSource.value = res.data.list || [] })
+      .finally(() => { loading.value = false })
+  }
+
+  return { dataSource, loading, getTableList }
+}
+
+function usePagination() {
+  const pageInfo = reactive({ pageNo: 1, pageSize: 10, total: 0 })
+  const resetPageIndex = () => { pageInfo.pageNo = 1 }
+  const updatePageTotal = (total) => { pageInfo.total = total }
+  return { pageInfo, resetPageIndex, updatePageTotal }
+}
+
+// ✅ 核心链：依赖通过参数显式传入
+function useSearchForm(deps: {
+  getPageInfo: () => { pageNo: number; pageSize: number }
+  getTableList: (params: any) => void
+  resetPageIndex: () => void
+}) {
+  const searchForm = ref({ keyword: '', timeRange: [] })
+
+  const queryParams = computed(() => ({
+    ...deps.getPageInfo(),
+    keyword: searchForm.value.keyword,
+  }))
+
+  const handleSearch = (resetPage = false) => {
+    if (resetPage) deps.resetPageIndex()
+    deps.getTableList(queryParams.value)
+  }
+
+  const resetForm = () => {
+    searchForm.value = { keyword: '', timeRange: [] }
+    handleSearch(true)
+  }
+
+  handleSearch()
+  return { searchForm, handleSearch, resetForm }
+}
+
+function usePaginationEvent(deps: { onPageChange: () => void }) {
+  const onPageChange = () => deps.onPageChange()
+  return { onPageChange }
+}
+
+// ✅ 叶子函数：handleSearch 通过闭包引用——可以接受
+// 6 个 Modal 函数都是"提交成功 → 刷新列表"的同一模式，
+// 为它们各传一个 deps.onSearch 参数反而增加了样板代码
+function useRegisModal() {
+  const regisApplyModalRef = ref(null)
+  const openRegisModal = (row) => regisApplyModalRef.value.openModal(row)
+  const submitData = (row) => {
+    submitApi(row).then(() => {
+      handleSearch() // 闭包引用——可容忍
+    })
+  }
+  return { regisApplyModalRef, openRegisModal, submitData }
+}
+
+function useApprovalModal() {
+  const approvalModalRef = ref(null)
+  const openApprovalModal = (row) => approvalModalRef.value.openModal(row)
+  const submitApproval = (data) => {
+    approveApi(data).then(() => {
+      handleSearch() // 闭包引用——可容忍
+    })
+  }
+  return { approvalModalRef, openApprovalModal, submitApproval }
+}
+// ... 其余 Modal 函数结构相同，省略
+</script>
+```
+
+**核心决策：哪些走显式注入，哪些可容忍闭包？**
+
+| 依赖关系特征 | 策略 | 原因 |
+|-------------|------|------|
+| 被 3 个以上函数调用（如 `handleSearch`、`getTableList`）| ✅ 显式注入 | 构成核心数据流，断了整个页面崩溃 |
+| 多个函数同时依赖同一个状态对象（如 `pageInfo`）| ✅ 显式注入 | 闭包引用链复杂时难以排查问题 |
+| 改变了页面全局状态（列表刷新、分页跳转）| ✅ 显式注入 | 高影响力操作，必须可追踪 |
+| 一对一关系：按钮 → 打开弹窗 | ⚠️ 可容忍闭包 | 不会出现循环依赖 |
+| 同一种模式重复 N 次（Modal 提交 → 刷新列表）| ⚠️ 可容忍闭包 | 语义统一，全传参数反而冗长 |
+
+**识别核心链的方法：**
+
+1. 画出函数调用图：谁调用了谁
+2. 被 3 个以上函数调用的 → 标记为核心
+3. 核心函数所依赖的状态（如 `pageInfo`）→ 也标记为核心
+4. 其余一对一的调用关系 → 可以走闭包
+
+**验证清单：**
+
+- [ ] 核心链上的函数可通过参数独立测试
+- [ ] 叶子函数的闭包依赖不超过 2 个外部变量
+- [ ] 没有循环依赖（A 闭包引用 B，B 也闭包引用 A）
+- [ ] 核心链的依赖方向清晰（单向，从上到下）
+
 ## 参考资料
 
 - [Vue.js Composables](https://vuejs.org/guide/reusability/composables.html)
