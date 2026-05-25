@@ -2,6 +2,12 @@
 
 Vue 3 Composition API 响应式与性能优化最佳实践。
 
+## 适用前提
+
+- 适用于 Vue 3 Composition API 项目；部分 API 有版本要求，请先对照主文档的版本兼容性表。
+- `watch` 的 `once` 选项需要 Vue 3.4+，`onWatcherCleanup()` 需要 Vue 3.5+。
+- VueUse、虚拟列表库等属于可选工具；仅在项目已引入或性能问题明确时采用。
+
 ---
 
 ## 1. ref vs shallowRef vs reactive
@@ -233,12 +239,12 @@ watch(id, (newId, oldId, onCleanup) => {
 
 ### onWatcherCleanup (Vue 3.5+)
 
-**Vue 3.5 引入了 `onWatcherCleanup()`** — 可以在 `watchEffect` 内部调用的清理函数（之前 `watchEffect` 不支持 `onCleanup` 回调参数）：
+**Vue 3.5 引入了 `onWatcherCleanup()`** — 可以在 `watch` 或 `watchEffect` 内部直接调用的清理注册函数。Vue 3.0+ 已经支持通过回调参数注册清理；`onWatcherCleanup()` 的价值是让清理逻辑不必依赖回调参数传递，在抽取辅助函数时更方便。
 
 ```typescript
 import { watchEffect, onWatcherCleanup } from 'vue'
 
-// ✅ Vue 3.5+: watchEffect 内部也能注册清理函数
+// ✅ Vue 3.5+: 不依赖回调参数，直接注册 watcher 清理函数
 watchEffect(() => {
   const controller = new AbortController()
 
@@ -251,16 +257,16 @@ watchEffect(() => {
 })
 ```
 
-**对比 `watch` 的 `onCleanup` 参数：**
+**对比回调参数里的 `onCleanup`：**
 
-| 特性 | `watch(fn, (_, __, onCleanup) => {})` | `watchEffect(() => { onWatcherCleanup(...) })` |
-|------|--------------------------------------|----------------------------------------------|
+| 特性 | `onCleanup` 回调参数 | `onWatcherCleanup()` |
+|------|----------------------|----------------------|
 | 可用性 | Vue 3.0+ | Vue 3.5+ |
 | 清理触发时机 | 下次执行前 + 卸载时 | 下次执行前 + 卸载时 |
-| 使用方式 | 回调参数 | 独立函数调用 |
-| 适用场景 | 精确监听 + 清理 | 自动追踪 + 清理 |
+| 使用方式 | 从 `watch` / `watchEffect` 回调参数接收 | 从 `vue` 导入后在当前 watcher 内调用 |
+| 适用场景 | 简单 watcher 内联清理 | 清理逻辑需要抽取到辅助函数或减少参数传递 |
 
-**为什么需要 `onWatcherCleanup`：** 之前 `watchEffect` 无法注册清理函数，导致在 effect 中发起的异步请求无法在新请求发起前自动取消，容易产生竞态条件。
+**什么时候使用 `onWatcherCleanup`：** 当清理逻辑需要放进内部辅助函数、组合式函数或更深的调用栈时，它比层层传递 `onCleanup` 参数更清晰。对于简单的内联 watcher，继续使用 `onCleanup` 参数也完全可以。
 
 ---
 
@@ -511,7 +517,7 @@ scope.stop()
 ### 实际场景：Composable 工厂
 
 ```typescript
-// hooks/web/useControlledEffects.ts
+// composables/effects/useControlledEffects.ts
 import { effectScope, ref, watch } from 'vue'
 
 export function useControlledEffects() {
@@ -607,7 +613,7 @@ const { theme, pure, layout, ... } = storeToRefs(store) // 过度解构
 
 ### Store 使用
 
-- [ ] 组件内用 `useXxxStore()`，组件外用 `useXxxStoreWithOut()`
+- [ ] 组件内用 `useXxxStore()`，组件外显式传入 `pinia` 或沿用项目的 `useXxxStoreWithOut()` 封装
 - [ ] 解构 store 用 `storeToRefs`
 - [ ] 避免深层 `watch` store
 - [ ] 不暴露整个 store 实例

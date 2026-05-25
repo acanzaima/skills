@@ -4,11 +4,13 @@
 
 ---
 
-## 1. 目录结构规范
+## 1. 目录结构示例
+
+推荐使用 Vue 语境更清晰的 `src/composables/` 组织组合式函数。
 
 ```
-src/hooks/
-├── web/                    # 业务相关 hooks
+src/composables/
+├── business/               # 业务相关 composables
 │   ├── useDesign.ts        # 命名空间/样式前缀
 │   ├── useEmitt.ts         # 事件总线
 │   ├── useEngine.ts        # 搜索引擎
@@ -20,12 +22,12 @@ src/hooks/
 │   ├── useSideCategory.ts  # 侧边栏分类
 │   ├── useSuggestion.ts    # 搜索建议
 │   └── useTimeAgo.ts       # 时间格式化
-└── event/                  # DOM 事件相关 hooks
+└── dom/                    # DOM 事件相关 composables
     └── useScrollTo.ts      # 滚动定位
 ```
 
-**规则**：
-- 按功能域划分子目录（`web/`、`event/`）
+**通用规则**：
+- 按功能域划分子目录（如 `business/`、`dom/`、`infrastructure/`，或沿用项目已有的目录）
 - 每个文件一个 composable，文件名即函数名
 - 函数名以 `use` 开头
 
@@ -38,7 +40,7 @@ src/hooks/
 封装独立的响应式状态和操作逻辑。
 
 ```typescript
-// hooks/web/useNetwork.ts
+// composables/business/useNetwork.ts
 import { ref } from 'vue'
 
 export function useNetwork() {
@@ -63,7 +65,7 @@ export function useNetwork() {
 用 composable 封装 store 访问，隐藏 store 内部实现细节。
 
 ```typescript
-// hooks/web/usePageIcon.ts
+// composables/business/usePageIcon.ts
 import { computed } from 'vue'
 import { useBusinessStoreWithOut } from '@/store/modules/business'
 
@@ -85,7 +87,7 @@ export function usePageIcon() {
 ```
 
 **特征**：
-- 使用 `useXxxStoreWithOut` 访问 store（因为 hook 可能在组件外使用）
+- 根据项目约定访问 store：组件内可用 `useXxxStore()`，组件外可传入 `pinia` 或沿用 `useXxxStoreWithOut` 封装
 - 对外暴露语义化接口，隐藏 store action 细节
 - 不维护自身状态，仅转发 store 数据
 
@@ -96,7 +98,7 @@ export function usePageIcon() {
 自动在组件卸载时清理副作用。
 
 ```typescript
-// hooks/web/useEmitt.ts
+// composables/events/useEmitt.ts
 import { onUnmounted } from 'vue'
 import { mittBus } from '@/utils/mitt'
 
@@ -138,7 +140,7 @@ export function useEmitt() {
 封装异步资源加载，提供加载状态。
 
 ```typescript
-// hooks/web/useLocalForage.ts
+// composables/infrastructure/useLocalForage.ts
 import { ref } from 'vue'
 import localforage from 'localforage'
 
@@ -180,7 +182,7 @@ export function useLocalForage(storeName: string) {
 接收参数，返回计算结果或操作函数，不维护持久状态。
 
 ```typescript
-// hooks/web/useDesign.ts
+// composables/business/useDesign.ts
 import { useAppStoreWithOut } from '@/store/modules/app'
 
 export function useDesign(scope: string) {
@@ -196,7 +198,7 @@ export function useDesign(scope: string) {
 ```
 
 ```typescript
-// hooks/event/useScrollTo.ts
+// composables/dom/useScrollTo.ts
 export function useScrollTo() {
   function scrollTo(target: HTMLElement, options?: ScrollToOptions) {
     target.scrollIntoView({
@@ -398,7 +400,7 @@ export function useBackup() {
 
 ```typescript
 // ✅ 放 composable：可复用的搜索引擎逻辑
-// hooks/web/useEngine.ts
+// composables/business/useEngine.ts
 export function useEngine() {
   const businessStore = useBusinessStoreWithOut()
   const currentEngine = computed(() => businessStore.getSearchEngine)
@@ -418,7 +420,7 @@ const openDialog = () => (dialogVisible.value = true)
 ## 8. 完整示例：生产级 Composable
 
 ```typescript
-// hooks/web/useSuggestion.ts
+// composables/business/useSuggestion.ts
 import { ref, onUnmounted } from 'vue'
 import { useEngine } from './useEngine'
 import { SUGGESTION_TIMEOUT } from '@/constants'
@@ -512,7 +514,7 @@ Composable 是纯函数（返回响应式状态 + 方法），非常适合单元
 ### 测试纯计算型 Composable
 
 ```typescript
-// hooks/__tests__/useDesign.test.ts
+// composables/business/__tests__/useDesign.test.ts
 import { describe, it, expect } from 'vitest'
 import { useDesign } from '../web/useDesign'
 
@@ -533,7 +535,7 @@ describe('useDesign', () => {
 ### 测试有状态 Composable
 
 ```typescript
-// hooks/__tests__/useEngine.test.ts
+// composables/business/__tests__/useEngine.test.ts
 import { describe, it, expect, beforeEach } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
 import { useEngine } from '../web/useEngine'
@@ -568,7 +570,7 @@ describe('useEngine', () => {
 ### 测试含生命周期的 Composable
 
 ```typescript
-// hooks/__tests__/useNetwork.test.ts
+// composables/business/__tests__/useNetwork.test.ts
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { useNetwork } from '../web/useNetwork'
 
@@ -594,7 +596,7 @@ describe('useNetwork', () => {
 ### 测试异步 Composable
 
 ```typescript
-// hooks/__tests__/useLocalForage.test.ts
+// composables/infrastructure/__tests__/useLocalForage.test.ts
 import { describe, it, expect } from 'vitest'
 import { useLocalForage } from '../web/useLocalForage'
 
@@ -622,7 +624,7 @@ describe('useLocalForage', () => {
 Store Bridge 模式的 composable 测试关键是初始化 pinia：
 
 ```typescript
-// hooks/__tests__/usePageIcon.test.ts
+// composables/business/__tests__/usePageIcon.test.ts
 import { describe, it, expect, beforeEach } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
 import { usePageIcon } from '../web/usePageIcon'
@@ -662,8 +664,8 @@ describe('usePageIcon', () => {
 **目录结构建议：**
 
 ```
-src/hooks/
-├── web/
+src/composables/
+├── business/
 │   ├── __tests__/           # 测试文件目录
 │   │   ├── useDesign.test.ts
 │   │   ├── useEngine.test.ts

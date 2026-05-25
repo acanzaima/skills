@@ -15,7 +15,7 @@ tags: [vue3, composition-api, dependencies, coupling, architecture, event-bus]
 - [ ] 通过函数参数显式传递依赖
 - [ ] 避免通过外层作用域闭包产生隐式依赖
 - [ ] 使用回调函数进行跨功能通信
-- [ ] 对于多对多通信，使用事件总线并自动清理
+- [ ] 对于复杂一对多通知，可使用事件总线并自动清理
 - [ ] 考虑依赖方向（单向，避免循环）
 - [ ] 优先使用 Store 桥接组合式函数访问共享状态
 
@@ -205,12 +205,14 @@ function useSearchWithPagination() {
 }
 ```
 
-### 模式 4：事件总线模式（适用于复杂的多对多场景）
+### 模式 4：事件总线模式（复杂通知的备选方案）
 
-使用 `mitt` 并自动清理，实现解耦通信：
+事件总线适合复杂的一对多通知，且这些通知不适合作为 Pinia 状态、Provide/Inject 上下文或路由状态表达时使用。它应是备选方案，不要替代简单的 Props/Emits 或显式回调。
+
+使用 `mitt` 并自动清理，实现解耦通信。`useEmitt` 是项目封装命名；通用项目也可以直接封装 `mitt`，或使用 VueUse 的 `useEventBus`：
 
 ```typescript
-// hooks/web/useEmitt.ts
+// composables/events/useEmitt.ts
 import { onUnmounted } from 'vue'
 import { mittBus } from '@/utils/mitt'
 
@@ -265,10 +267,12 @@ on('open-contextmenu', (data) => {
 
 | 场景 | 模式 | 原因 |
 |----------|---------|--------|
-| 直接父子关系 | 回调/Props | 简单、显式、类型安全 |
+| 直接父子关系 | Props / Emits | 简单、显式、类型安全 |
 | 同一组件内的兄弟功能 | 回调 | 依赖流清晰 |
-| 不同层级树的跨组件通信 | 事件总线 | 需要解耦 |
-| 一个事件多个监听器 | 事件总线 | 一对多关系 |
+| 跨层级局部共享 | Provide / Inject | 作用域清晰，不需要全局通道 |
+| 全局共享状态 | Pinia | 单一数据源，可调试 |
+| 路由驱动状态 | Router query / params | 可分享、可刷新恢复 |
+| 一个瞬时事件多个监听器 | 事件总线 | 一对多通知，不适合持久化为状态 |
 | 功能需要响应 store 变化 | Store 桥接 | 单一数据源 |
 
 ### 模式 5：Store 桥接用于共享状态
@@ -277,7 +281,7 @@ on('open-contextmenu', (data) => {
 
 ```typescript
 // ✅ Good — Store 桥接提供统一接口
-// hooks/web/useSideCategory.ts
+// composables/business/useSideCategory.ts
 export const useSideCategory = () => {
   const appStore = useAppStoreWithOut()
 

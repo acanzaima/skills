@@ -13,7 +13,7 @@ tags: [vue3, composition-api, composables, reusability, dry]
 ## 任务清单
 
 - [ ] 识别多个组件中使用的逻辑
-- [ ] 提取到 `composables/` 或 `hooks/` 目录
+- [ ] 提取到 `composables/` 目录
 - [ ] 保持组合式函数专注于单一职责
 - [ ] 使用参数进行配置和依赖注入
 - [ ] 返回响应式引用和方法
@@ -64,7 +64,7 @@ onUnmounted(() => window.removeEventListener('resize', handleResize))
 **GOOD - 提取到组合式函数：**
 
 ```typescript
-// hooks/web/useWindowSize.ts
+// composables/dom/useWindowSize.ts
 import { ref, onMounted, onUnmounted } from 'vue'
 
 export function useWindowSize() {
@@ -86,7 +86,7 @@ export function useWindowSize() {
 ```vue
 <!-- ComponentA.vue / ComponentB.vue -->
 <script setup lang="ts">
-import { useWindowSize } from '@/hooks/web/useWindowSize'
+import { useWindowSize } from '@/composables/dom/useWindowSize'
 
 const { width, height } = useWindowSize()
 </script>
@@ -110,7 +110,7 @@ const { width, height } = useWindowSize()
 无状态或最小状态，单一用途：
 
 ```typescript
-// hooks/web/useDesign.ts
+// composables/business/useDesign.ts
 import variables from '@/styles/global.module.less'
 
 export const useDesign = () => {
@@ -133,7 +133,7 @@ export const useDesign = () => {
 将 store 访问封装在清晰的 API 之后。这是实际项目中最具影响力的提取模式：
 
 ```typescript
-// hooks/web/useEngine.ts
+// composables/business/useEngine.ts
 import { useAppStoreWithOut } from '@/store/modules/app'
 import { SEARCH_ENGINE_INFO, SEARCH_ENGINE_ORDER } from '@/config/setting'
 
@@ -174,14 +174,14 @@ export const useEngine = () => {
 - 组件不需要 `import { useAppStore }` 和了解 store 结构
 - 业务规则（例如 `SEARCH_ENGINE_ORDER.filter`）集中在一处
 - 可以轻松替换 store 实现，无需修改组件
-- 通过 `useXxxStoreWithOut` 可在组件外使用
+- 组件外可通过 `useXxxStore(pinia)` 或项目封装的 `useXxxStoreWithOut` 使用
 
 ### 模式 3：基于事件的组合式函数
 
 管理副作用并自动清理：
 
 ```typescript
-// hooks/web/useNetwork.ts
+// composables/business/useNetwork.ts
 import { ref, onBeforeUnmount } from 'vue'
 
 export const useNetwork = () => {
@@ -208,7 +208,7 @@ export const useNetwork = () => {
 接受配置以实现灵活性：
 
 ```typescript
-// hooks/web/useCoordinateArea.ts
+// composables/dom/useCoordinateArea.ts
 interface Coordinate { x1: number; y1: number; x2: number; y2: number }
 type DirectionX = 'ltr' | 'rtl'
 type DirectionY = 'ttb' | 'btt'
@@ -246,7 +246,7 @@ export const useCoordinateArea = (
 用 Vue 友好的 API 封装第三方库：
 
 ```typescript
-// hooks/web/useCache.ts
+// composables/infrastructure/useCache.ts
 import WebStorageCacheCrypto from 'web-storage-cache-crypto'
 import sm4 from '@/utils/cipher/sm4'
 
@@ -271,14 +271,16 @@ export const useCache = (type: CacheType = 'localStorage', crypt: boolean = true
 }
 ```
 
-## 目录结构
+## 目录结构示例
+
+推荐使用 Vue 语境更清晰的 `src/composables/` 组织组合式函数。
 
 ```
 src/
-├── hooks/                     # 组合式函数目录
-│   ├── event/                 # 事件相关的组合式函数
+├── composables/               # 组合式函数目录
+│   ├── dom/                   # DOM 事件相关的组合式函数
 │   │   └── useScrollTo.ts     # 平滑滚动
-│   └── web/                   # Web API 与业务逻辑组合式函数
+│   └── business/              # Web API 与业务逻辑组合式函数
 │       ├── useCache.ts        # 加密存储
 │       ├── useCoordinateArea.ts  # 鼠标位置检测
 │       ├── useDesign.ts       # CSS 命名空间
@@ -296,7 +298,7 @@ src/
 
 **命名规范：**
 - 文件名与函数名一致：`useEngine.ts` → `export const useEngine = () => {}`
-- 按领域分组：`event/` 用于 DOM 事件，`web/` 用于 Web API 和业务逻辑
+- 按领域分组：例如 `dom/` 用于 DOM 事件，`business/` 用于 Web API 和业务逻辑
 - 每个文件一个组合式函数
 
 ## 最佳实践

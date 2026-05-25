@@ -101,7 +101,7 @@ const emit = defineEmits<{
 // store
 const appStore = useAppStore()
 
-// 外部 hooks
+// 外部 composables
 const { user, loading, fetchUser } = useUser()
 const { theme, toggleTheme } = useTheme()
 
@@ -187,7 +187,7 @@ function useCounter() {
 | 4 | `inject` | 可选 | 注入的依赖 |
 | 5 | `defineEmits` | 可选 | 带类型声明的组件事件 |
 | 6 | Store 声明 | 可选 | Pinia store 实例（`useXxxStore()`） |
-| 7 | 外部 hooks | 可选 | 导入的组合式函数 |
+| 7 | 外部 composables | 可选 | 导入的组合式函数 |
 | 8 | 功能声明 | 可选 | `const { ... } = useFeature()` |
 | 9 | `provide` | 可选 | 提供的依赖 |
 | 10 | `defineExpose` | 可选 | 暴露的公共 API |
@@ -212,7 +212,7 @@ const emit = defineEmits<{ update: [value: string] }>()
 // store
 const appStore = useAppStore()
 
-// 外部 hooks
+// 外部 composables
 const { t } = useI18n()
 
 // 功能声明
@@ -234,7 +234,7 @@ defineOptions({ name: 'UserComponent' })
 
 const appStore = useAppStore()
 
-// ============ 外部 Hooks ============
+// ============ 外部 Composables ============
 
 const { t } = useI18n()
 

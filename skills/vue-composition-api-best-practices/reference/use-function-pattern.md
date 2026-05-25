@@ -251,7 +251,7 @@ const { currentPage, goToPage } = usePagination({
 当组合式函数封装 store 访问时，需提供干净的接口来隐藏 store 实现细节：
 
 ```typescript
-// 页面图标管理 hooks - 封装 store 访问
+// 页面图标管理 composable - 封装 store 访问
 export const usePageIcon = () => {
   const appStore = useAppStoreWithOut()
 
@@ -308,7 +308,7 @@ export const usePageIcon = () => {
 - 组件无需了解 store 内部结构
 - 业务逻辑集中在一处
 - 便于在无需更新所有组件的情况下更改 store 结构
-- 与 `useXxxStoreWithOut` 无缝配合，适用于非组件场景
+- 可按项目约定配合 `useXxxStore(pinia)` 或 `useXxxStoreWithOut`，适用于非组件场景
 
 ## 命名约定
 
@@ -316,7 +316,8 @@ export const usePageIcon = () => {
 |---------|---------|----------|
 | `useXxx` | `useSearch()` | 组件内部的功能封装 |
 | `useXxx` | `useUserStore()` | 外部组合式函数导入 |
-| `useXxxStoreWithOut` | `useAppStoreWithOut()` | 组件外部的 store 访问 |
+| `useXxxStore(pinia)` | `useAppStore(pinia)` | 组件外部的通用 Pinia 访问 |
+| `useXxxStoreWithOut` | `useAppStoreWithOut()` | 项目封装的组件外 store 访问 |
 | `useXxx`（桥接） | `usePageIcon()` | Store 桥接组合式函数 |
 
 ## 何时提取到外部文件
@@ -328,7 +329,7 @@ export const usePageIcon = () => {
 - 作为 store 数据的桥接层
 
 ```typescript
-// hooks/web/usePageIcon.ts
+// composables/business/usePageIcon.ts
 export const usePageIcon = () => {
   const appStore = useAppStoreWithOut()
   // ...
@@ -336,7 +337,7 @@ export const usePageIcon = () => {
 }
 
 // 在组件中
-import { usePageIcon } from '@/hooks/web/usePageIcon'
+import { usePageIcon } from '@/composables/business/usePageIcon'
 const { curPageIcons, addPageIcon } = usePageIcon()
 ```
 

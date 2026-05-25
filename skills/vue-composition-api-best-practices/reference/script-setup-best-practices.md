@@ -10,6 +10,12 @@ tags: [vue3, composition-api, script-setup, typescript, best-practices]
 
 **影响程度：高** — `<script setup>` 是编写 Vue 3 组件的推荐方式。理解其模式可确保类型安全和可维护性。
 
+## 适用前提
+
+- 适用于 Vue 3 SFC，尤其是采用 `<script setup lang="ts">` 的项目。
+- `defineOptions`、`toValue()` 需要 Vue 3.3+；`defineModel` 需要 Vue 3.4+；`useTemplateRef()`、`useId()` 需要 Vue 3.5+。
+- Store 访问模式假设项目使用 Pinia；组件外访问 store 的约定详见 [Store Without 模式](store-without-pattern.md)。
+
 ## 任务清单
 
 - [ ] 使用 `<script setup lang="ts">` 以支持 TypeScript
@@ -182,10 +188,10 @@ const isDark = computed(() => appStore.getIsDark)
 </script>
 ```
 
-### 在 Vue 组件外 — 使用 `useXxxStoreWithOut()`
+### 在 Vue 组件外 — 显式传入 pinia 或沿用项目封装
 
 ```typescript
-// ✅ Good - 在 utils、hooks、plugins 中使用 WithOut 版本
+// ✅ Good - 项目已有 WithOut 封装时，在 utils、composables、plugins 中沿用
 import { useAppStoreWithOut } from '@/store/modules/app'
 
 export const useEngine = () => {
@@ -195,7 +201,18 @@ export const useEngine = () => {
 ```
 
 ```typescript
-// ✅ Good - 在 utils/migration.ts 中
+// ✅ Good - 调用方能拿到 pinia 实例时，直接传入 pinia
+import type { Pinia } from 'pinia'
+import { useAppStore } from '@/store/modules/app'
+
+export const createEngine = (pinia: Pinia) => {
+  const appStore = useAppStore(pinia)
+  // ...
+}
+```
+
+```typescript
+// ✅ Good - 在 utils/migration.ts 中沿用项目 WithOut 约定
 import { useAppStoreWithOut } from '@/store/modules/app'
 
 export async function migrateOnlineIcons() {
@@ -216,7 +233,8 @@ export async function setupI18n(app: App) {
 
 **区分两者的原因：**
 - `useXxxStore()` 依赖 Vue 的 `inject`/`provide`，仅在组件上下文中可用
-- `useXxxStoreWithOut(store)` 显式传入 pinia 实例，可在任意位置使用
+- `useXxxStore(pinia)` 是通用的显式 pinia 用法
+- `useXxxStoreWithOut()` 是项目约定封装，适合已有全局 pinia 且不需要请求级隔离的项目
 - 使用错误会导致运行时错误：`getActivePinia was called with no active Pinia`
 
 详见 [store-without-pattern](store-without-pattern.md)。
@@ -386,8 +404,12 @@ provide(THEME_KEY, 'blue')
 import { inject } from 'vue'
 import { THEME_KEY, CONFIG_KEY } from '@/types/injection-keys'
 
-// ✅ 使用 InjectionKey — 完全类型化，无需默认值
-const theme = inject(THEME_KEY) // Ref<'light' | 'dark'>
+// ✅ 使用 InjectionKey — 类型化，但 provider 缺失时仍可能是 undefined
+const theme = inject(THEME_KEY) // Ref<'light' | 'dark'> | undefined
+
+if (!theme) {
+  throw new Error('THEME_KEY provider is missing')
+}
 
 // ✅ 带默认值 — 类型推导，不会是 undefined
 const config = inject(CONFIG_KEY, { apiUrl: '/fallback', timeout: 3000 })
@@ -399,7 +421,7 @@ const maybeConfig = inject<AppConfig>('config') // AppConfig | undefined
 
 | 模式 | 返回类型 | 使用场景 |
 |---------|------------|-------------|
-| `inject(key)` 配合 `InjectionKey` | `T`（不可为 null） | 祖先组件中存在 provider |
+| `inject(key)` 配合 `InjectionKey` | `T \| undefined` | provider 必须由调用方校验或由封装函数保证 |
 | `inject(key, default)` | `T`（不可为 null） | provider 可能不存在 |
 | `inject<string>('key')` | `T \| undefined` | 旧的字符串 key 模式 |
 
@@ -512,7 +534,7 @@ count.value = 1
 ### ❌ 不要在组件外使用 `useXxxStore()`
 
 ```typescript
-// ❌ Bad - 在 utils/hooks/plugins 中会抛出错误
+// ❌ Bad - 在 utils/composables/plugins 中会抛出错误
 import { useAppStore } from '@/store/modules/app'
 export function someUtil() {
   const store = useAppStore() // Error: pinia is not defined
