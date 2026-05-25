@@ -1,5 +1,7 @@
 # acan-skills
 
+[![skills.sh](https://skills.sh/b/acanzaima/skills)](https://skills.sh/acanzaima/skills)
+
 acan's Agent skills.
 
 > [中文](README.md)
