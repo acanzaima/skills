@@ -23,7 +23,7 @@ Use vue skill, refactor this Vue SFC to follow the project's Composition API bes
 - Watch `props.orgId` with `{ immediate: true }` or otherwise avoid a separate `onMounted(loadUsers)` that duplicates the initial fetch.
 - Use `props.pageSize ?? 20` instead of `props.pageSize || 20`.
 - Do not introduce `useXxxStoreWithOut()` because the input component is inside `<script setup>` and already uses `useUserStore()`.
-- Do not introduce `src/hooks`, `@/hooks`, or `hooks/` paths; use `src/composables/` only if logic is moved to external files.
+- Use `src/composables/` only if logic is moved to external files.
 - Do not add an event bus for parent-child selection; keep `defineEmits`.
 
 ## Acceptable Variations

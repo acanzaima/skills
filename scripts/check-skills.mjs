@@ -71,6 +71,23 @@ function checkLocalLinks(file) {
   }
 }
 
+function walkFiles(dir, predicate) {
+  const files = []
+
+  for (const entry of readdirSync(dir)) {
+    const fullPath = path.join(dir, entry)
+    const stat = statSync(fullPath)
+
+    if (stat.isDirectory()) {
+      files.push(...walkFiles(fullPath, predicate))
+    } else if (predicate(fullPath)) {
+      files.push(fullPath)
+    }
+  }
+
+  return files
+}
+
 const skillsDir = path.join(root, 'skills')
 if (!existsSync(skillsDir)) {
   fail('skills directory is missing')
@@ -107,6 +124,10 @@ if (!existsSync(skillsDir)) {
     }
 
     checkLocalLinks(skillFile)
+
+    for (const markdownFile of walkFiles(skillPath, (file) => file.endsWith('.md'))) {
+      checkLocalLinks(markdownFile)
+    }
   }
 }
 
