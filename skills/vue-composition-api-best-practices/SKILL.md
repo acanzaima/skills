@@ -4,7 +4,7 @@ description: "Vue 3 组合式 API 与 <script setup> 最佳实践。涵盖代码
 license: MIT
 metadata:
   author: github.com/acanzaima
-  version: 1.1.0
+  version: 1.1.1
   tags: [vue3, composition-api, script-setup, typescript, pinia, composables, reactivity, performance]
 ---
 

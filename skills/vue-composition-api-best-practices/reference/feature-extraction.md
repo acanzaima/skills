@@ -292,7 +292,7 @@ src/
 │       ├── useNetwork.ts      # 网络状态
 │       ├── usePageIcon.ts     # 页面图标（Store 桥接）
 │       ├── useSideCategory.ts # 侧边栏分类（Store 桥接）
-│       ├── useSuggestion.ts   # 搜索建议 JSONP
+│       ├── useSuggestion.ts   # 搜索建议
 │       └── useTimeAgo.ts      # 相对时间
 ```
 

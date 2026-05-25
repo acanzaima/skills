@@ -607,7 +607,7 @@ const { theme, pure, layout, ... } = storeToRefs(store) // 过度解构
 
 - [ ] 事件监听器在 `onUnmounted` 中移除
 - [ ] 定时器在 `onUnmounted` 中清除
-- [ ] JSONP 脚本在完成/超时后移除
+- [ ] 异步请求使用 `AbortController` 或 watcher cleanup 取消过期请求
 - [ ] `watch` 返回的 `stop` 函数在适当时机调用
 - [ ] `watchEffect` 中使用 `onWatcherCleanup()` 清理异步请求（3.5+）
 

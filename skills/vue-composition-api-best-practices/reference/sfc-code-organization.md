@@ -309,7 +309,11 @@ function useSearchInput() {
     const useContent = encodeURIComponent(val)
     if (!useContent) return
     businessStore.updateHistoryList(val)
-    window.open(`${engineInfo.value.url}${useContent}`, appStore.openType)
+    businessStore.submitSearch({
+      engine: engineInfo.value.key,
+      keyword: useContent,
+      openType: appStore.openType
+    })
   }
 
   // ... 更多逻辑

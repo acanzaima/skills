@@ -421,7 +421,7 @@ const openDialog = () => (dialogVisible.value = true)
 
 ```typescript
 // composables/business/useSuggestion.ts
-import { ref, onUnmounted } from 'vue'
+import { ref } from 'vue'
 import { useEngine } from './useEngine'
 import { SUGGESTION_TIMEOUT } from '@/constants'
 
@@ -437,21 +437,7 @@ export function useSuggestion(options?: SuggestionOptions) {
   // 状态
   const suggestions = ref<string[]>([])
   const loading = ref(false)
-
-  // 清理：JSONP 脚本和超时定时器
-  let scriptEl: HTMLScriptElement | null = null
-  let timer: ReturnType<typeof setTimeout> | null = null
-
-  function cleanup() {
-    if (scriptEl) {
-      scriptEl.remove()
-      scriptEl = null
-    }
-    if (timer) {
-      clearTimeout(timer)
-      timer = null
-    }
-  }
+  let controller: AbortController | null = null
 
   async function fetch(keyword: string) {
     if (!keyword.trim()) {
@@ -459,40 +445,25 @@ export function useSuggestion(options?: SuggestionOptions) {
       return
     }
 
-    cleanup()
+    controller?.abort()
+    controller = new AbortController()
     loading.value = true
 
-    return new Promise<void>((resolve) => {
-      const callbackName = `suggestion_${Date.now()}`
-
-      // JSONP 回调
-      ;(window as any)[callbackName] = (data: string[]) => {
-        suggestions.value = data.slice(0, maxResults)
-        loading.value = false
-        cleanup()
-        delete (window as any)[callbackName]
-        resolve()
-      }
-
-      // 超时处理
-      timer = setTimeout(() => {
+    try {
+      // 通过可信 API 或后端代理获取建议，避免在客户端执行第三方脚本。
+      const data = await currentEngine.value.fetchSuggestions(keyword, {
+        signal: controller.signal,
+        timeout
+      })
+      suggestions.value = data.slice(0, maxResults)
+    } catch (error) {
+      if ((error as DOMException).name !== 'AbortError') {
         suggestions.value = []
-        loading.value = false
-        cleanup()
-        delete (window as any)[callbackName]
-        resolve()
-      }, timeout)
-
-      // 注入脚本
-      const url = currentEngine.value.suggestionUrl(keyword, callbackName)
-      scriptEl = document.createElement('script')
-      scriptEl.src = url
-      document.head.appendChild(scriptEl)
-    })
+      }
+    } finally {
+      loading.value = false
+    }
   }
-
-  // 自动清理
-  onUnmounted(cleanup)
 
   return { suggestions, loading, fetch }
 }
@@ -501,7 +472,7 @@ export function useSuggestion(options?: SuggestionOptions) {
 这个示例综合了多种模式：
 - **Options 模式**：可配置超时和最大结果数
 - **异步资源**：loading 状态管理
-- **生命周期感知**：onUnmounted 自动清理
+- **安全边界**：通过可信 API 或后端代理获取第三方建议，不在客户端注入远程脚本
 - **最小暴露**：只返回 suggestions、loading、fetch
 - **错误处理**：超时降级为空列表
 
