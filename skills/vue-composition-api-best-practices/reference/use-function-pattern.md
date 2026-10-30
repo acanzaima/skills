@@ -12,6 +12,8 @@ tags: [vue3, composition-api, script-setup, use-pattern, code-organization]
 
 ## 任务清单
 
+**B 层项目约定**：仅在项目采用此分组方式或任务明确要求结构重构时使用本清单。逻辑邻近组织也有效，不因缺少 useXxx 包装判为缺陷。
+
 - [ ] 将功能逻辑封装在 `useFeatureName()` 函数中
 - [ ] 仅返回外部需要的值和方法
 - [ ] 将功能实现放在 script 底部
@@ -71,7 +73,7 @@ function selectItem(item: any) {
 
 ```vue
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, onScopeDispose } from 'vue'
 
 // 功能声明
 
@@ -104,15 +106,25 @@ function useSearch() {
   const searchQuery = ref('')
   const searchResults = ref<SearchResult[]>([])
   const isSearching = ref(false)
+  const error = ref<unknown>(null)
+  let requestId = 0
+  let disposed = false
+  onScopeDispose(() => { disposed = true; requestId++ })
 
   const hasResults = computed(() => searchResults.value.length > 0)
 
   const handleSearch = async () => {
+    if (disposed) return
+    const current = ++requestId
     isSearching.value = true
+    error.value = null
     try {
-      searchResults.value = await fetchResults(searchQuery.value)
+      const result = await fetchResults(searchQuery.value)
+      if (current === requestId) searchResults.value = result
+    } catch (cause) {
+      if (current === requestId) error.value = cause
     } finally {
-      isSearching.value = false
+      if (current === requestId) isSearching.value = false
     }
   }
 
@@ -123,6 +135,7 @@ function useSearch() {
     searchResults,
     isSearching,
     hasResults,
+    error,
     handleSearch
   }
 }
@@ -206,7 +219,9 @@ function useSearch() {
   const isEmpty = computed(() => results.value.length === 0)
 
   // 监听器
-  watch(query, debounce(search, 300))
+  const debouncedSearch = debounce(search, 300)
+  watch(query, debouncedSearch)
+  onScopeDispose(() => debouncedSearch.cancel()) // 示例假设使用支持 cancel 的 debounce
 
   // 生命周期
   onMounted(() => {
@@ -250,10 +265,13 @@ const { currentPage, goToPage } = usePagination({
 
 当组合式函数封装 store 访问时，需提供干净的接口来隐藏 store 实现细节：
 
+> 下面从 setup 同步调用标准 store，并接受项目的稳定 ID 生成器；组件外改为显式 pinia 工厂。
+
 ```typescript
 // 页面图标管理 composable - 封装 store 访问
-export const usePageIcon = () => {
-  const appStore = useAppStoreWithOut()
+export const usePageIcon = (createKey: () => string) => {
+  // setup 同步调用；组件外使用时可改为显式传入 pinia 的工厂
+  const appStore = useAppStore()
 
   // 当前 page
   const curPage = computed(() => appStore.selectCategory.key)
@@ -263,32 +281,33 @@ export const usePageIcon = () => {
 
   // 新增 page icon
   const addPageIcon = (icon: PageItemWithOptionalKey, page?: string) => {
-    if (!appStore.pageIconMap[page || curPage.value]) {
-      appStore.addPageIconInfo(page || curPage.value)
+    const pageKey = page ?? curPage.value
+    const icons = appStore.pageIconMap[pageKey] ?? []
+    const item: PageItem = { ...icon, key: icon.key ?? createKey() }
+    if (icons.some(existing => existing.key === item.key)) {
+      throw new Error(`Duplicate icon key: ${item.key}`)
     }
-    const icons = appStore.pageIconMap[page || curPage.value]
-    if (!icon.key) {
-      icon.key = `${page || curPage.value}-icon-${icon.type}-${icons.length}`
-    }
-    appStore.updatePageIconInfo(page || curPage.value, icons.concat(icon as PageItem))
+    if (!appStore.pageIconMap[pageKey]) appStore.addPageIconInfo(pageKey)
+    appStore.updatePageIconInfo(pageKey, [...icons, item])
   }
 
   // 更新 page icon
   const updatePageIcon = (icon: PageItem, page: string) => {
     const icons = appStore.pageIconMap[page]
+    if (!icons) return
     const targetIdx = icons.findIndex((i) => i.key === icon.key)
     if (targetIdx !== -1) {
-      icons[targetIdx] = icon
-      appStore.updatePageIconInfo(page, icons)
+      const next = icons.map((item, index) => index === targetIdx ? { ...icon } : item)
+      appStore.updatePageIconInfo(page, next)
     }
   }
 
   // 删除 page icon
   const removePageIcon = (icon: PageItem, page?: string) => {
-    const icons = appStore.pageIconMap[page || curPage.value]
+    const icons = appStore.pageIconMap[page ?? curPage.value]
     if (icons) {
       appStore.updatePageIconInfo(
-        page || curPage.value,
+        page ?? curPage.value,
         icons.filter((item) => item.key !== icon.key)
       )
     }
@@ -305,6 +324,8 @@ export const usePageIcon = () => {
 ```
 
 **Store 桥接模式的收益：**
+
+`createKey` 由项目稳定 ID 工具提供，不使用数组长度；新增时不修改调用方输入。Pinia 允许直接修改 state，这不是框架反模式；本例统一通过 action 更新，是为了沿用项目的数据写入契约。相关业务不变量也可以直接放在 store action，无需为了转发增加桥接层。
 - 组件无需了解 store 内部结构
 - 业务逻辑集中在一处
 - 便于在无需更新所有组件的情况下更改 store 结构
@@ -312,12 +333,14 @@ export const usePageIcon = () => {
 
 ## 命名约定
 
+> **SFC 内部的 `function useXxx()` 不是可复用 composable**：它只是当前页面的功能分组，被调用一次并依赖外层 `props`/`emit`/store。不要把它当公共 API，也不要自动提取到 `src/composables/`。如果团队担心与真正的 composable 混淆，可以改用 `createXxxFeature()` 或直接按注释分组。
+
 | 模式 | 示例 | 使用场景 |
 |---------|---------|----------|
-| `useXxx` | `useSearch()` | 组件内部的功能封装 |
+| `useXxx` | `useSearch()` | 组件内部的功能封装（项目约定） |
 | `useXxx` | `useUserStore()` | 外部组合式函数导入 |
 | `useXxxStore(pinia)` | `useAppStore(pinia)` | 组件外部的通用 Pinia 访问 |
-| `useXxxStoreWithOut` | `useAppStoreWithOut()` | 项目封装的组件外 store 访问 |
+| `useXxxStoreWithOut` | `useAppStoreWithOut()` | 项目封装的组件外 store 访问（仅已有约定时） |
 | `useXxx`（桥接） | `usePageIcon()` | Store 桥接组合式函数 |
 
 ## 何时提取到外部文件
@@ -328,18 +351,7 @@ export const usePageIcon = () => {
 - 不依赖父组件状态
 - 作为 store 数据的桥接层
 
-```typescript
-// composables/business/usePageIcon.ts
-export const usePageIcon = () => {
-  const appStore = useAppStoreWithOut()
-  // ...
-  return { curPageIcons, addPageIcon, updatePageIcon, removePageIcon }
-}
-
-// 在组件中
-import { usePageIcon } from '@/composables/business/usePageIcon'
-const { curPageIcons, addPageIcon } = usePageIcon()
-```
+提取时保留输入契约（包括 `createKey`）和实例归属；组件内传入项目现有的稳定 ID 生成器，不引入长度计数 key 或全局 pinia。
 
 ## 功能实现检查清单
 
@@ -348,10 +360,12 @@ const { curPageIcons, addPageIcon } = usePageIcon()
 - [ ] 所有相关状态都在函数内部（不散落在外部）
 - [ ] 从状态派生的计算属性都在函数内部
 - [ ] 响应状态变化的监听器都在函数内部
-- [ ] 生命周期钩子（`onMounted`、`onBeforeUnmount`）都在函数内部
-- [ ] 清理逻辑（`removeEventListener`、`off`）在 `onBeforeUnmount` 内
+- [ ] 生命周期钩子（`onMounted`、`onScopeDispose`/`onUnmounted`）都在函数内部
+- [ ] 清理逻辑（`removeEventListener`、`off`）在 `onScopeDispose`/`onUnmounted` 内
 - [ ] 只返回组件需要的内容
 - [ ] 内部实现细节被隐藏
+- [ ] 拆分没有改变请求次数、初始化时序或清理时机
+- [ ] 没有为了“分组”而把单个 computed / 单个 `ref` 包装成函数
 
 ## 参考
 

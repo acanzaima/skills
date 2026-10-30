@@ -10,11 +10,12 @@ Use vue skill, refactor this composable so Pinia store access is safe outside Vu
 
 ## Expected Behavior Checklist
 
-- Identify that `useThemeBridge()` is an external composable, not a component `<script setup>` block.
-- Do not call `useAppStore()` without an active pinia guarantee.
-- Prefer an explicit `pinia` parameter when the caller can provide it, for example `useThemeBridge(pinia: Pinia)`.
-- If and only if the codebase already has a `useAppStoreWithOut()` convention, using that wrapper is acceptable.
-- Do not introduce a global singleton pinia in a way that would break SSR request isolation.
+- Recognize that being in a `.ts` file is not itself the problem: a composable called synchronously from `setup()` still has injection context.
+- Treat the real criterion as “can the correct pinia instance be obtained at call time”, not component vs non-component file location.
+- If the composable may be called outside `setup()` (plugins, router guards, tests, SSR), accept an explicit `pinia` parameter, for example `useThemeBridge(pinia: Pinia)`.
+- If it is only called from `setup()`, `useAppStore()` is valid; do not rewrite it to `WithOut` merely because it lives in a `.ts` file.
+- If and only if the codebase already has a `useAppStoreWithOut()` convention, and the project is a single-app non-SSR context, using that wrapper is acceptable.
+- Do not introduce a global singleton pinia in a way that would break SSR request isolation or test isolation.
 - Keep `theme`, `isDark`, and `toggleTheme()` behavior equivalent.
 - Use `storeToRefs()` if destructuring reactive store state.
 - Do not expose the whole store unless the caller truly needs it.

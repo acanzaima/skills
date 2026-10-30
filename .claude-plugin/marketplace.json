@@ -13,7 +13,7 @@
     {
       "name": "vue-composition-api-best-practices",
       "source": "./skills/vue-composition-api-best-practices",
-      "description": "Vue 3 Composition API and <script setup> best practices. Covers SFC code organization (11-step order), useXxx function patterns, feature extraction to composables, cross-feature dependency management, TypeScript integration with props/emits/defineModel, Pinia store access inside and outside components (Store Without pattern), composable design patterns (5 patterns + testing), and reactivity & performance optimization. MUST be used when developing, refactoring, or reviewing Vue 3 applications."
+      "description": "Vue 3 Composition API reference for reactivity correctness, request races, cleanup, props/model contracts, SSR and Pinia instance boundaries. Use for writing, refactoring or reviewing SFCs and composables. Apply API version constraints and existing project conventions; keep local fixes minimal. SFC ordering and useXxx grouping are optional team conventions."
     }
   ]
 }

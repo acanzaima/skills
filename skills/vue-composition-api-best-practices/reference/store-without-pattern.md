@@ -1,22 +1,57 @@
-# Store Without 模式
+# 组件外访问 Store（含 Store Without 约定）
 
 ## 适用前提
 
-- 适用于使用 Pinia 且存在全局 `pinia` / `store` 导出的 Vue 项目。
-- 主要解决组件外上下文（composables、utils、plugins、路由守卫、axios 拦截器）访问 store 的问题。
-- SSR、微前端或测试隔离场景需要特别谨慎，避免全局 store 造成跨请求状态污染或绕过测试中的 `setActivePinia()`。
+- 项目使用 Pinia，并且存在组件外访问 store 的需求（composables、utils、plugins、路由守卫、axios 拦截器）。
+- 本文先讲**判断标准**，再把 `useXxxStoreWithOut` 作为一种**项目约定**介绍。
+- SSR、微前端、多应用和测试隔离场景，必须显式使用对应的 pinia 实例；不要依赖全局单例。
 
-## 问题
+## 问题：判断标准不是“文件位置”
 
-Pinia 的 `useStore()` 默认依赖 Vue 组件上下文（inject/provide）。在组件外（composables、utils、plugins、路由守卫、axios 拦截器）直接调用会抛出错误：
+Pinia 的 `useStore()` 在调用时会按顺序寻找 pinia：
+
+1. 当前组件注入上下文（`inject`）；
+2. 全局 `activePinia`。
+
+两者都没有时才会抛错：
 
 ```
 Error: "getActivePinia()" was called but there was no active Pinia.
 ```
 
-## 解决方案：Store Without 模式
+因此，是否报错取决于**调用时机和实例归属**，而不是代码写在 `.vue` 还是 `.ts` 文件里：
 
-`useXxxStoreWithOut` 是一种团队约定封装：每个 store 模块额外导出一个函数，内部传入全局 pinia 实例，方便组件外上下文访问 store。它不是 Pinia 官方必须采用的标准模式；如果当前项目已经直接使用 `useXxxStore(pinia)`、SSR 请求级 pinia，或其它 store 工厂封装，应优先沿用项目现有方式。
+| 调用位置 | 是否有上下文 | 结果 |
+|----------|--------------|------|
+| 组件 `setup()` 内 | 有 | `useStore()` 正常 |
+| 从 `setup()` **同步**调用的 composable | 仍有注入上下文 | `useStore()` 正常 |
+| 单应用 SPA，`app.use(pinia)` 之后 | 没有注入上下文，但有 `activePinia` | 通常也能工作，但依赖隐式全局状态 |
+| SSR / 多应用 / 并行测试 | 实例可能不同或互相覆盖 | 必须显式传入对应 pinia |
+| `app.use(pinia)` 之前、未设置 `activePinia` 的测试或工具脚本 | 都没有 | 抛错 |
+
+> “能工作”不等于“应该依赖”。显式传入 pinia 仍然更适合 SSR、多实例和测试隔离。
+
+## 场景与做法
+
+| 场景 | 推荐做法 | 原因 |
+|------|----------|------|
+| 组件 `<script setup>` | `useAppStore()` | 使用当前组件注入的实例 |
+| 从 setup 同步调用的 composable | `useAppStore()` | 仍在注入上下文中 |
+| 组件外，调用方能拿到 pinia | `useAppStore(pinia)` 或工厂函数 | 实例归属明确，可测试、可 SSR |
+| 单应用 SPA，确认不需要请求级隔离 | 可使用 `activePinia`，或项目封装的 `WithOut` | 少写样板，但接受全局单例 |
+| SSR / 多应用 / 测试 | 显式 `pinia` 参数 | 避免跨请求、跨应用状态污染 |
+
+## Store Without 约定（项目封装）
+
+### 组件外 inject 与应用上下文
+
+插件/工具需要读取 `app.provide()` 的依赖时，Vue 3.3+ 可在 `app.runWithContext(() => inject(KEY))` 的**同步回调**中取得依赖，再显式传给后续异步工作。它不创建组件实例，不触发组件生命周期，也不会跨 await 保留注入上下文。Pinia 的实例归属仍优先用 `useStore(pinia)` 表达；不要为了普通 store 访问增加一层上下文包装。
+
+应用级监听器或连接需要应用级销毁入口；Vue 3.5+ 可注册 `app.onUnmount(dispose)`。这不代替 SSR 请求级资源管理，也不保证服务端渲染结束会调用应用卸载。
+
+参考：[Vue Application API](https://vuejs.org/api/application.html#app-runwithcontext)。
+
+`useXxxStoreWithOut` 是团队约定封装：每个 store 模块额外导出一个函数，内部传入项目全局 pinia 实例。**它不是 Pinia 官方必须采用的标准模式**；如果项目已经使用 `useXxxStore(pinia)`、请求级 pinia 或其它工厂封装，应优先沿用现有方式。
 
 ### 模式定义
 
@@ -29,7 +64,7 @@ export const useAppStore = defineStore('app', {
   // ... store 定义
 })
 
-// 在组件外使用时，传入全局 pinia 实例
+// 组件外使用时，传入项目全局 pinia 实例
 export const useAppStoreWithOut = () => {
   return useAppStore(store)
 }
@@ -51,18 +86,9 @@ export const store = pinia
 
 ## 使用规则
 
-### 何时使用哪个
+### 在 Vue 组件中：使用标准方式
 
-| 函数 | 使用场景 | 原因 |
-|------|---------|------|
-| `useAppStore()` | Vue 组件 `<script setup>` 内 | 自动从组件上下文获取 pinia |
-| `useAppStore(pinia)` | 组件外且调用方能拿到正确 pinia 实例 | 通用 Pinia 用法，适合 SSR、测试和多实例应用 |
-| `useAppStoreWithOut()` | 项目已有全局 store 封装，且确认不需要请求级隔离 | 减少重复导入全局 pinia 的样板代码 |
-
-### 在 Vue 组件中（始终使用标准方式）
-
-```typescript
-// ✅ GOOD：组件内使用标准方式
+```vue
 <script setup lang="ts">
 import { useAppStore } from '@/store/modules/app'
 
@@ -70,39 +96,39 @@ const appStore = useAppStore()
 </script>
 ```
 
-```typescript
-// ❌ BAD：组件内使用 WithOut 是多余的
+```vue
+<!-- BAD：组件内使用 WithOut 是多余的 -->
 <script setup lang="ts">
 import { useAppStoreWithOut } from '@/store/modules/app'
 
-const appStore = useAppStoreWithOut() // 可以工作但不必要
+const appStore = useAppStoreWithOut()
 </script>
 ```
 
-> ⚠️ **常见误用警告**：在 `<script setup>` 内使用 `useXxxStoreWithOut()` **不会报错**（因为 pinia 实例确实存在），所以这种误用非常隐蔽。但它绕过了 Vue 的 `inject`/`provide` 依赖注入体系，会导致以下问题：
+> **常见误用警告**：在 `<script setup>` 内使用 `useXxxStoreWithOut()` 不会报错，因为全局 pinia 确实存在，所以这种误用非常隐蔽。但它绕过了组件注入体系，会带来：
 >
-> - **SSR 场景下状态污染**：`useAppStoreWithOut()` 始终返回同一个全局 pinia 实例，而 `useAppStore()` 会通过 `inject` 获取当前请求级别的实例，避免服务端渲染时的跨请求状态泄露
-> - **测试时无法隔离**：单元测试中无法通过 `setActivePinia(createPinia())` 替换 store——`WithOut` 版本硬编码了全局实例，绕过了测试隔离机制
-> - **组件复用性降低**：如果组件被嵌入到另一个 pinia 实例的应用中（如微前端场景），`WithOut` 会连接到错误的 store
+> - **SSR 状态污染**：`WithOut` 始终返回同一个全局实例，而 `useAppStore()` 会获取当前请求级别的实例；
+> - **测试无法隔离**：`setActivePinia(createPinia())` 对硬编码全局实例的 `WithOut` 无效；
+> - **微前端/多应用连错实例**。
 >
-> **记住**：`WithOut` 的后缀字面意思就是"在没有组件上下文的地方使用"。如果你在 `<script setup>` 里——你有上下文，就别用 `WithOut`。
+> `WithOut` 的字面意思就是“在没有组件上下文的地方使用”。在 `<script setup>` 里，你有上下文，就不要用。
 
-### 在 Composables / Utils / Plugins 中（按项目约定选择）
+### 在 composable 中：先判断调用上下文
 
 ```typescript
-// ✅ GOOD：项目已有 WithOut 封装时，在 composables 中沿用
+// ✅ 从 setup 同步调用：有注入上下文，直接用标准方式
 // composables/business/useSideCategory.ts
-import { useBusinessStoreWithOut } from '@/store/modules/business'
+import { useBusinessStore } from '@/store/modules/business'
 
 export function useSideCategory() {
-  const businessStore = useBusinessStoreWithOut()
+  const businessStore = useBusinessStore()
   const categories = computed(() => businessStore.getSideCategory)
   return { categories }
 }
 ```
 
 ```typescript
-// ✅ GOOD：调用方能拿到 pinia 实例时，直接传入 pinia
+// ✅ 需要在组件外调用：显式接收 pinia，便于 SSR 和测试
 import type { Pinia } from 'pinia'
 import { useBusinessStore } from '@/store/modules/business'
 
@@ -114,7 +140,7 @@ export function createSideCategory(pinia: Pinia) {
 ```
 
 ```typescript
-// ✅ GOOD：utils 中使用 WithOut
+// ✅ 项目已有 WithOut 约定时，在 utils/plugins 中沿用
 // utils/migration.ts
 import { useBusinessStoreWithOut } from '@/store/modules/business'
 
@@ -125,8 +151,7 @@ export async function migrateOnlineIcons() {
 ```
 
 ```typescript
-// ❌ BAD：组件外直接使用标准方式会报错
-// utils/migration.ts
+// ❌ BAD：组件外且没有 active pinia 时直接用标准方式
 import { useBusinessStore } from '@/store/modules/business'
 
 export async function migrateOnlineIcons() {
@@ -134,9 +159,7 @@ export async function migrateOnlineIcons() {
 }
 ```
 
-## 命名规范
-
-如果项目采用 Store Without 封装，建议所有模块遵循统一命名规范：
+## 命名规范（采用约定时）
 
 | Store 模块 | 标准函数 | WithOut 函数 |
 |-----------|---------|-------------|
@@ -147,27 +170,27 @@ export async function migrateOnlineIcons() {
 
 **规则**：`use{ModuleName}StoreWithOut` — 模块名首字母大写 + Store + WithOut（注意大小写）。
 
-## 实现清单
-
-采用 Store Without 封装时，每个 store 模块建议：
+## 实现清单（采用约定时）
 
 - [ ] 导出标准 `useXxxStore` 函数（`defineStore` 的返回值）
 - [ ] 导出 `useXxxStoreWithOut` 函数，内部调用 `useXxxStore(store)`
 - [ ] 从 `@/store` 导入全局 `store` 实例
 - [ ] WithOut 函数放在文件底部，紧跟标准函数之后
+- [ ] 不要在 `.vue` 组件中调用 WithOut
+- [ ] SSR/多应用项目不要使用这个约定，改用显式 `pinia` 参数
 
-## 为什么不直接使用 `useXxxStore(pinia)`？
+## 为什么优先 `useXxxStore(pinia)`？
 
-可以直接调用 `useAppStore(pinia)`，这是更通用、也更适合 SSR / 测试隔离的方式。`WithOut` 函数适合作为项目约定封装，提供：
+1. **实例归属明确**：不依赖“当前是否碰巧有 active pinia”。
+2. **SSR 安全**：每个请求使用自己的 pinia。
+3. **可测试**：测试可以传入 `createPinia()`，无需操作全局状态。
+4. **多应用/微前端安全**：不会连接到错误的全局实例。
 
-1. **语义明确** — 函数名直接表达"在组件外使用"的意图
-2. **统一入口** — 不需要每个调用方都 import `store`，减少依赖
-3. **集中管理** — 如果 pinia 实例获取方式变更，只需改 WithOut 函数
-4. **可搜索** — 搜索 `WithOut` 即可找到所有组件外使用 store 的地方
+`WithOut` 只适合作为已有项目的兼容封装；在陌生项目里不要主动引入。
 
-## 替代方案：`storeToRefs` 注意事项
+## storeToRefs 注意事项
 
-注意 `useXxxStoreWithOut()` 返回的是 store 实例，如需解构响应式属性，仍需使用 `storeToRefs`：
+`useXxxStoreWithOut()` 返回的是 store 实例，如需解构响应式属性，仍需使用 `storeToRefs`：
 
 ```typescript
 import { storeToRefs } from 'pinia'
@@ -184,8 +207,7 @@ export function useAppInfo() {
 
 | 优势 | 说明 |
 |------|------|
-| 解决组件外访问 | 让 store 可在缺少组件上下文但存在全局 pinia 的地方使用 |
+| 解决组件外访问 | 让 store 可在缺少注入上下文、但存在全局 pinia 的地方使用 |
 | 命名约定清晰 | `WithOut` 后缀一目了然 |
 | 减少样板代码 | 调用方无需 import store |
-| 易于维护 | pinia 实例变更只需改一处 |
-| 可追溯 | 搜索 `WithOut` 可定位所有组件外使用 |
+| 权衡 | 绑定全局单例；SSR、多应用、测试隔离场景应改用显式 `pinia` |

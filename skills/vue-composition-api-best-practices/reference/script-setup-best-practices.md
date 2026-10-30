@@ -19,13 +19,14 @@ tags: [vue3, composition-api, script-setup, typescript, best-practices]
 ## 任务清单
 
 - [ ] 使用 `<script setup lang="ts">` 以支持 TypeScript
-- [ ] 使用 `defineOptions` 设置组件名称（Vue 3.3+）—— 务必始终使用
-- [ ] 使用类型声明式的 `defineProps` 和 `defineEmits`
-- [ ] 使用 `defineModel` 实现双向绑定（Vue 3.4+）
-- [ ] 使用 `useTemplateRef()` 获取类型安全的模板引用（Vue 3.5+）
+- [ ] 需要稳定组件名时使用 `defineOptions`（Vue 3.3+）；`<script setup>` 自 3.2.34 起可按文件名推断，不必强制
+- [ ] 为 props/emits 保留类型约束和已有运行时校验，不为风格切换声明方式
+- [ ] 新增双向绑定可用 `defineModel`（Vue 3.4+）；检查父子初始值契约
+- [ ] 使用 `useTemplateRef()` 获取类型安全的模板引用（Vue 3.5+，静态模板可自动推断类型）
 - [ ] 使用 `useId()` 生成无障碍友好的唯一 ID（Vue 3.5+）
-- [ ] 优先使用 `toValue()` 而非 `unref()` 来解包 MaybeRef（Vue 3.3+）
+- [ ] 输入允许 getter 时用 `MaybeRefOrGetter` + `toValue()`；函数本身是值时用 `unref()`
 - [ ] 使用 `InjectionKey` 为 `provide`/`inject` 添加类型
+- [ ] Vue 3.5+ 直接解构 props 后，用 getter 传给 watcher/composable；旧版本保留 `props.xxx` 或 `toRef`
 - [ ] 避免将 `<script setup>` 与 Options API 混用
 - [ ] 在组件内和组件外使用正确的 Store 访问模式
 
@@ -33,63 +34,80 @@ tags: [vue3, composition-api, script-setup, typescript, best-practices]
 
 使用 `<script setup>` 时的常见错误可能导致类型问题、响应性丢失或令人困惑的代码模式。
 
-## defineOptions — 务必始终使用
+## defineOptions — 需要稳定组件名时声明
 
-`defineOptions` 对于 DevTools 识别、`keep-alive` 的 include/exclude 以及递归组件至关重要：
+`defineOptions` 用于覆盖或补充组件选项。它不是所有组件的必需品：自 Vue 3.2.34 起，使用 `<script setup>` 的 SFC 会**按文件名自动推断 `name`**，即使配合 `<KeepAlive>` 也无需手动声明。
 
 ```vue
 <script setup lang="ts">
-// ✅ Good - 始终设置组件名称
+// ✅ 需要稳定名称时显式声明
 defineOptions({
   name: 'MiSearch'
 })
 </script>
 ```
 
-**在真实项目中的重要性：**
-- Vue DevTools 显示组件名称而非 `<Anonymous>`
-- `<keep-alive :include="['MiSearch']">` 可以正常工作
-- 递归组件可以引用自身
-- 调试堆栈信息具有可读性
-- 更易于在代码库中按组件名称搜索
+**什么时候值得显式声明：**
+- 组件库/公共组件，文件名不等于对外名称
+- 需要覆盖文件名推断出的名称（例如希望 `<KeepAlive :include>` 匹配自定义名称、DevTools 显示、错误堆栈可读性）
+- 递归组件希望名称更明确（SFC 也可以按文件名自引用）
+- 同目录存在同名文件或构建后文件名不可控
+
+**不建议**把 `defineOptions` 当成“每个组件都必须写”的规则；对普通业务组件，它只会增加无意义 diff。
 
 ## TypeScript 集成
 
 ### 带类型的 Props
 
-**BAD — 运行时声明：**
+**运行时声明也能推导类型**；`string | undefined` 来自 prop 非必填，而不是“运行时声明不支持类型”：
 
 ```vue
 <script setup lang="ts">
-// props 使用时没有类型推导
+// ✅ 运行时声明：构造器提供基础类型，复杂类型可借助 PropType
 const props = defineProps({
-  title: String,
-  count: {
-    type: Number,
-    default: 0
-  }
+  title: { type: String, required: true }, // string
+  count: { type: Number, default: 0 } // number
 })
-// props.title 的类型是 string | undefined，而不是 string
 </script>
 ```
 
-**GOOD — 基于类型的声明：**
+**GOOD — 基于类型的声明（复杂类型、联合类型、泛型更清晰）：**
 
 ```vue
 <script setup lang="ts">
 interface Props {
   title: string
   count?: number
+  labels?: string[]
 }
 
 const props = withDefaults(defineProps<Props>(), {
-  count: 0
+  count: 0,
+  labels: () => ['one'] // 可变对象/数组用工厂，每个实例独立
 })
 
 // props.title 的类型是 string（必填、已定义）
 // props.count 的类型是 number（可选、有默认值）
 </script>
 ```
+
+运行时声明也可以用 `PropType` 表达复杂对象和字面量联合：
+
+```typescript
+import type { PropType } from 'vue'
+
+interface User { id: string; name: string }
+type Size = 'small' | 'large'
+
+const props = defineProps({
+  user: { type: Object as PropType<User>, required: true },
+  size: { type: String as PropType<Size>, default: 'small' }
+})
+```
+
+> 类型声明式写法通常更简洁；运行时声明便于直接配置 `validator` 等选项。两者都能表达复杂类型，不要仅为风格改写已有声明，或丢掉运行时校验。`PropType` 提供静态类型，不会自动生成完整的运行时数据校验。
+
+同一次 `defineProps` / `defineEmits` 调用不能同时传类型参数和运行时声明。类型到运行时的转换基于 AST，不支持把需要完整类型分析的条件类型用于整个 props 对象。`withDefaults` 只设置默认值，不会让之后的普通解构获得响应式；数组/对象默认值使用工厂。3.5 直接解构默认值（如 `const { labels = ['one'] } = defineProps<Props>()`）不需要工厂。
 
 ### 带类型的 Emits
 
@@ -127,32 +145,44 @@ emit('delete', '123') // ✅
 
 ```vue
 <script setup lang="ts">
+import MyForm from './MyForm.vue'
+
 // 简单 model
 const model = defineModel<string>()
-model.value = 'new value' // 更新父组件
 
-// 带选项
-const count = defineModel<number>({
-  default: 0,
+// 在事件处理中更新父组件（这里省略事件）
+function updateModel() {
+  model.value = 'new value'
+}
+
+// 父组件应初始化 count；required 收窄类型，但不会替父组件赋初值
+const count = defineModel<number>('count', {
   required: true
 })
 
 // 命名 model
 const title = defineModel<string>('title')
 const description = defineModel<string>('description')
-
-// 带校验器
-const email = defineModel<string>({
-  default: '',
-  validator: (value) => value.includes('@')
-})
 </script>
 
 <template>
+  <!-- 默认 v-model 可以绑原生 input -->
   <input v-model="model" />
-  <input v-model:title="title" v-model:description="description" />
+
+  <!-- 命名 model 用于组件；原生 input 不支持 v-model:title / v-model:count -->
+  <MyForm
+    v-model:title="title"
+    v-model:description="description"
+    v-model:count="count"
+  />
 </template>
 ```
+
+> `v-model:title` 是**组件**的命名 model 语法；原生 `<input>` 不支持带参数的 `v-model`，正常 SFC 构建会报告编译错误：`v-model argument is not supported on plain elements.`
+>
+> `defineModel` 的选项会传给底层 prop。`defineModel<string>()` 的值可能为 `undefined`，`{ required: true }` 将其类型收窄为 `string`，但不替代运行时业务校验。
+
+**父子初值契约：** 子组件 `defineModel({ default: 1 })` 配合父组件 `const value = ref<number>()`、`<Child v-model="value" />`，会出现父值 `undefined`、子值 `1`，默认值不会自动回写父组件。优先在父组件初始化 `ref(1)`；确需子组件默认值时，明确允许未绑定/未初始化的行为，不要用挂载时无条件 emit 掩盖契约问题。
 
 **Vue 3.4 之前（手动实现）：**
 
@@ -173,7 +203,66 @@ const inputValue = computed({
 </script>
 ```
 
+## 其他值得知道的 3.3+ 能力
+
+### defineSlots（3.3+）
+
+```vue
+<script setup lang="ts">
+interface Item {
+  id: string
+}
+
+const slots = defineSlots<{
+  default?: (props: { message: string }) => any
+  item?: (props: { item: Item }) => any
+}>()
+</script>
+```
+
+`defineSlots` 只接受类型参数，不生成运行时插槽校验；它同时返回 slots 对象，与 `useSlots()` 的返回值相同，不必重复调用 `useSlots()`。
+
+### 泛型组件（3.3+）
+
+```vue
+<script setup lang="ts" generic="T extends string | number">
+const props = defineProps<{
+  items: T[]
+  selected: T
+}>()
+
+const emit = defineEmits<{
+  select: [item: T]
+}>()
+</script>
+```
+
+泛型组件适合列表、选择器、表格列等“元素类型由调用方决定”的场景；注意泛型组件的模板引用类型需要 `ComponentExposed` 等工具类型，不能直接用 `InstanceType`。
+
+### defineModel 修饰符（3.4+）
+
+```vue
+<script setup lang="ts">
+const [model, modifiers] = defineModel<string>({
+  set(value) {
+    if (modifiers.capitalize) {
+      return value.charAt(0).toUpperCase() + value.slice(1)
+    }
+    return value
+  }
+})
+</script>
+
+<template>
+  <!-- 修饰符由父组件传入，子组件这里只绑普通 v-model -->
+  <input v-model="model" />
+</template>
+```
+
+父组件写 `<MyForm v-model.capitalize="text" />` 时，子组件通过 `modifiers.capitalize` 读取修饰符；不要在子组件里假设修饰符一定存在。
+
 ## Store 访问模式
+
 
 ### 在 Vue 组件内 — 使用 `useXxxStore()`
 
@@ -231,11 +320,12 @@ export async function setupI18n(app: App) {
 }
 ```
 
-**区分两者的原因：**
-- `useXxxStore()` 依赖 Vue 的 `inject`/`provide`，仅在组件上下文中可用
-- `useXxxStore(pinia)` 是通用的显式 pinia 用法
-- `useXxxStoreWithOut()` 是项目约定封装，适合已有全局 pinia 且不需要请求级隔离的项目
-- 使用错误会导致运行时错误：`getActivePinia was called with no active Pinia`
+**判断标准是调用时能否拿到正确的 pinia 实例，不是文件位置：**
+- 在 `setup()` 内、或从 setup **同步**调用的 composable：仍有注入上下文，`useXxxStore()` 正常
+- 单应用 SPA 在 `app.use(pinia)` 之后：`activePinia` 已设置，组件外通常也能工作，但这是隐式全局状态
+- SSR、多应用、测试隔离：必须显式传入对应 `pinia`，否则可能串状态
+- 只有在“没有注入上下文、也没有 active pinia”时才会抛 `getActivePinia was called with no active Pinia`
+- `useXxxStoreWithOut()` 是项目约定封装，适合已有全局 pinia 且不需要请求级隔离的项目；陌生项目不要主动引入
 
 详见 [store-without-pattern](store-without-pattern.md)。
 
@@ -275,7 +365,7 @@ const focus = () => {
 }
 
 const clear = () => {
-  inputRef.value!.value = ''
+  if (inputRef.value) inputRef.value.value = ''
 }
 
 // 暴露方法供父组件调用
@@ -315,16 +405,24 @@ onMounted(() => {
 
 ### useTemplateRef（Vue 3.5+）
 
-**Vue 3.5 引入了 `useTemplateRef()`** — 一种类型安全的替代方案，用于替代普通的 `ref()` 来获取模板引用。它解决了尴尬的 `null` 初始化问题，并提供更好的类型推导：
+`useTemplateRef()` 返回一个浅层 ref，其值与模板中匹配的 `ref` attribute 同步。它的类型是：
+
+```ts
+function useTemplateRef<T>(key: string): Readonly<ShallowRef<T | null>>
+```
+
+在 Vue 3.5 + `@vue/language-tools` 2.1+ 的 SFC 中，**静态模板引用**的类型可以根据 `ref` 所在的元素/组件自动推断；动态组件、非 SFC 场景或推断失败时，再显式传泛型。`v-for` 上的 `ref` 类型推断目前仍不完整，数组场景建议显式标注。
 
 ```vue
 <script setup lang="ts">
-// ✅ Vue 3.5+：无需 null 初始值，类型从模板中推导
-const inputRef = useTemplateRef<HTMLInputElement>('inputRef')
+// 静态模板引用：3.5 + language-tools 2.1 可自动推断
+const inputRef = useTemplateRef('inputRef')
+
+// 动态组件/推断失败时显式标注
 const componentRef = useTemplateRef<InstanceType<typeof MyComponent>>('componentRef')
 
 onMounted(() => {
-  inputRef.value?.focus() // HTMLInputElement | undefined
+  inputRef.value?.focus() // value 仍是 T | null
 })
 </script>
 
@@ -338,10 +436,13 @@ onMounted(() => {
 
 | 特性 | `ref<T \| null>` | `useTemplateRef<T>()` |
 |---------|-------------------|-----------------------|
-| 初始值 | 必须指定 `null` | 自动推导，无需手动设置 null |
-| 挂载后的类型 | `T \| null` | `T \| undefined` |
-| 需要 ref 名称匹配 | 手动（靠约定） | 通过字符串参数强制匹配 |
-| 支持 v-for | ✅ `ref<T[]>([])` | ✅ `useTemplateRef<T[]>('list')` |
+| 初始值 | 手动写 `null` | 由 API 创建，无需手写初始值 |
+| 值的类型 | `T \| null` | `T \| null`（不是 `undefined`） |
+| 名称匹配 | 靠约定 | 名称作为参数传入，但**字符串本身不做类型检查** |
+| 类型来源 | 手动泛型 | 3.5 + language-tools 2.1 可对静态 ref 自动推断；否则手动泛型 |
+| v-for | `ref<T[]>([])` | 可写 `useTemplateRef<T[]>('list')`，但类型推断可能仍需手动标注 |
+
+> `useTemplateRef` 不会自动保证“不会拿到 null”：挂载前、`v-if` 卸载后都是 `null`，访问时仍需可选链或类型守卫。
 
 ### useId（Vue 3.5+）
 
@@ -361,8 +462,10 @@ const labelId = useId()
 
 **为什么不使用 `Math.random()` 或计数器？**
 - `useId()` 是 SSR 安全的 — 服务端和客户端生成匹配的 ID
-- 不会在组件实例之间产生冲突
-- 在客户端导航（SPA 路由切换）之间会清除
+- 同一个组件的多个实例、同一实例内的多次调用都会得到不同 ID
+- 官方只保证“每个应用内唯一”，**不保证路由切换后重置**；不要把“会清除”当成行为契约
+- 同一页面有多个 Vue 应用时，用 `app.config.idPrefix` 给每个应用加前缀，避免 ID 冲突
+- 不要在 `computed()` 内部调用 `useId()`；在 computed 外部声明 ID，再在计算函数里引用
 
 ### Provide/Inject 与 TypeScript
 
@@ -422,18 +525,17 @@ const maybeConfig = inject<AppConfig>('config') // AppConfig | undefined
 | 模式 | 返回类型 | 使用场景 |
 |---------|------------|-------------|
 | `inject(key)` 配合 `InjectionKey` | `T \| undefined` | provider 必须由调用方校验或由封装函数保证 |
-| `inject(key, default)` | `T`（不可为 null） | provider 可能不存在 |
+| `inject(key, default)` | `T`（是否含 null/undefined 取决于 T） | provider 可能不存在 |
 | `inject<string>('key')` | `T \| undefined` | 旧的字符串 key 模式 |
 
-**⚠️ 在 TypeScript 中不要使用纯字符串进行 provide/inject** — 你会失去所有类型安全和 IDE 自动补全。
+优先使用 `InjectionKey<T>`，把提供端和消费端的类型关联起来。字符串 key 配合显式泛型仍能约束消费端类型，但不能校验双方是否约定了同一类型。
 
 ### toValue() vs unref()
 
-**Vue 3.3 引入了 `toValue()`**，作为解包 "MaybeRef" 值的首选方式：
+**Vue 3.3 引入了 `toValue()`**，用于接受值、ref 或 getter 的输入契约；它不是 `unref()` 的无条件替代品：
 
 ```typescript
-import { toValue, unref } from 'vue'
-import type { MaybeRef } from 'vue'
+import { ref, toValue, unref } from 'vue'
 
 // 两者都可以标准化 ref 和普通值
 const a = ref(42)
@@ -449,17 +551,17 @@ unref(b)  // 100
 // toValue() 还可以解包 getter（返回值的函数）
 const getter = () => 42
 toValue(getter) // 42 ✅
-unref(getter)   // () => 42 ❌（不会调用 getter）
+unref(getter)   // () => 42（保留函数本身；函数属于数据时这正是需要的行为）
 ```
 
 **经验法则：**
-- 如果你的组合式函数接受 `MaybeRef<T>` — 使用 `toValue()` 来标准化
-- 如果你只处理 `Ref` 对象 — `unref()` 也可以
-- 新代码应优先使用 `toValue()` 以保持向前兼容
+- 接受值/ref/getter：声明 `MaybeRefOrGetter<T>`，在 `watch(() => toValue(source), ...)` 或 effect 内读取，才能追踪 getter 的依赖。
+- 接受 `MaybeRef<T>`，且函数本身是回调或数据：使用 `unref()`，避免意外执行函数。
+- 不需要响应输入变化时可只读取一次，但应把“初始化快照”写入接口契约。
 
 ## 应避免的反模式
 
-### ❌ 不要与 Options API 混用
+### ❌ 不要将 Options API 状态混入 `<script setup>`
 
 ```vue
 <!-- BAD - 混合风格 -->
@@ -479,22 +581,54 @@ const double = computed(() => this.count * 2) // Error!
 </script>
 ```
 
-### ❌ 不要解构 Props
+> 官方允许普通 `<script>` 与 `<script setup>` 共存，用于 `inheritAttrs`、命名导出等少量场景；但不要把 Options API 的 `data`/`methods`/生命周期混进来，再在 setup 中依赖它们。
+
+### ⚠️ 解构 Props 的版本边界
+
+**任何版本都不建议先取 `props` 对象再解构**，因为这一步会丢失响应式：
 
 ```vue
 <script setup lang="ts">
 const props = defineProps<{ count: number }>()
+const { count } = props // ❌ 得到普通 number
+</script>
+```
 
-// BAD - 丢失响应性
-const { count } = props
+**Vue 3.4 及以下**：用 `toRefs(props)`，或直接访问 `props.xxx`：
 
-// GOOD - 使用 toRefs
-const { count } = toRefs(props)
-
-// 或者直接使用 props
+```vue
+<script setup lang="ts">
+const props = defineProps<{ count: number }>()
+const { count } = toRefs(props) // ✅ 保持响应式
 const double = computed(() => props.count * 2)
 </script>
 ```
+
+**Vue 3.5+**：可以直接解构 `defineProps()`，并使用 JS 默认值：
+
+```vue
+<script setup lang="ts">
+const { count = 0, label = 'total' } = defineProps<{
+  count?: number
+  label?: string
+}>()
+</script>
+```
+
+> 3.5 的响应式 props 解构依赖编译器转换，只对**直接解构 `defineProps()` 返回值**生效；`const props = defineProps(); const { count } = props` 仍然是普通解构，不会自动变响应式。
+
+解构绑定不是 Ref。`watch(count, ...)` 会编译报错，传给普通函数的 `count` 只是当时的值。保持追踪需传 getter，接收方也必须支持 getter：
+
+```ts
+watch(() => count, (value) => console.log(value))
+useCounter(() => count) // useCounter 接受 MaybeRefOrGetter<number>
+```
+
+不要给解构绑定赋值；它仍是只读 prop。需要编辑时用本地草稿或通过 emit/model 请求父组件更新。对象 prop 的嵌套字段不会因此自动成为深只读，也不应借此修改父组件数据。
+
+### 顶层 await 与实例上下文
+
+`<script setup>` 顶层 `await` 会生成 `async setup()`，按 Vue 核心的用法需要父级 `Suspense` 处理；`Suspense` 仍是实验性 API，框架项目遵循其异步组件约定。编译器会恢复顶层 await 后的组件上下文，但普通 async 函数、异步回调或手写 async setup 不能假定有同样恢复机制。需要组件实例的生命周期、inject 和清理应在有效上下文中同步注册。`defineExpose` 放在顶层 await 之前。
 
 ### ❌ 不要在 script setup 中使用 `this`
 
@@ -531,21 +665,35 @@ count.value = 1
 </template>
 ```
 
-### ❌ 不要在组件外使用 `useXxxStore()`
+### ⚠️ 组件外使用 `useXxxStore()` 的前提
+
+判断标准不是“文件是不是 `.vue`”，而是**调用时能否拿到正确的 pinia 实例**：
 
 ```typescript
-// ❌ Bad - 在 utils/composables/plugins 中会抛出错误
-import { useAppStore } from '@/store/modules/app'
-export function someUtil() {
-  const store = useAppStore() // Error: pinia is not defined
+import type { Pinia } from 'pinia'
+
+// ✅ 从 setup 同步调用的 composable：仍有注入上下文
+export function useThemeBridge() {
+  const appStore = useAppStore() // 正常
+  // ...
 }
 
-// ✅ Good - 使用 WithOut 版本
-import { useAppStoreWithOut } from '@/store/modules/app'
+// ✅ 组件外、调用方能提供 pinia：显式传入
+export function createThemeBridge(pinia: Pinia) {
+  const appStore = useAppStore(pinia)
+  // ...
+}
+
+// ✅ 单应用 SPA，app.use(pinia) 之后：activePinia 存在，通常也能工作
+// 但这是隐式全局状态，SSR/多应用/测试隔离场景不要依赖
+
+// ❌ 没有注入上下文，也没有 active pinia（如 app.use 之前的工具脚本）
 export function someUtil() {
-  const store = useAppStoreWithOut() // 正常工作！
+  const store = useAppStore() // Error: no active Pinia
 }
 ```
+
+> `useXxxStoreWithOut()` 是项目约定封装，只在项目已有该约定时沿用；陌生项目应优先用显式 `pinia` 参数。
 
 ## 性能提示
 

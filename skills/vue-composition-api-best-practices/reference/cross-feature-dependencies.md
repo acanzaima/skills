@@ -12,12 +12,14 @@ tags: [vue3, composition-api, dependencies, coupling, architecture, event-bus]
 
 ## 任务清单
 
+本页的编排方式属于 B 层项目约定，按已有架构选择；仅修 bug 时不要求抽函数、桥接或改变闭包结构。各小节是独立示例，项目类型/API 需接入实际实现。
+
 - [ ] 通过函数参数显式传递依赖
 - [ ] 避免通过外层作用域闭包产生隐式依赖
 - [ ] 使用回调函数进行跨功能通信
 - [ ] 对于复杂一对多通知，可使用事件总线并自动清理
 - [ ] 考虑依赖方向（单向，避免循环）
-- [ ] 优先使用 Store 桥接组合式函数访问共享状态
+- [ ] 简单读写直接用 store；新增跨 store 协作或页面派生职责时才增加桥接
 
 ## 问题所在
 
@@ -56,73 +58,9 @@ watch(activeFilter, () => {
 </script>
 ```
 
-**GOOD - 通过参数显式传递依赖：**
+**推荐：页面持有完整查询参数，再组合筛选、分页与请求。**
 
-```vue
-<script setup lang="ts">
-import { ref, watch } from 'vue'
-
-// 功能声明
-
-const {
-  searchQuery,
-  searchResults,
-  handleSearch
-} = useSearch()
-
-const {
-  currentPage,
-  changePage
-} = usePagination({
-  onPageChange: handleSearch
-})
-
-const {
-  activeFilter,
-  setFilter
-} = useFilter({
-  onFilterChange: () => {
-    changePage(1)
-    handleSearch()
-  }
-})
-
-// ============ 功能实现 ============
-
-function useSearch() {
-  const searchQuery = ref('')
-  const searchResults = ref<SearchResult[]>([])
-
-  const handleSearch = async () => {
-    searchResults.value = await fetchResults(searchQuery.value)
-  }
-
-  return { searchQuery, searchResults, handleSearch }
-}
-
-function usePagination(options: { onPageChange: () => void }) {
-  const currentPage = ref(1)
-
-  const changePage = (page: number) => {
-    currentPage.value = page
-    options.onPageChange()
-  }
-
-  return { currentPage, changePage }
-}
-
-function useFilter(options: { onFilterChange: () => void }) {
-  const activeFilter = ref('all')
-
-  const setFilter = (filter: string) => {
-    activeFilter.value = filter
-    options.onFilterChange()
-  }
-
-  return { activeFilter, setFilter }
-}
-</script>
-```
+可运行的数据流与请求保护见 [SFC 重构示例](../examples/sfc-refactor.md)：先初始化分页，再把 getter 传给列表功能；页面事件一次完成“更新参数 → 请求”。不要同时由 watcher 和事件回调为同一次变更重复请求。
 
 ## 依赖模式
 
@@ -153,54 +91,44 @@ const { currentPage, goToPage } = usePagination({
 
 ### 模式 2：Ref 注入模式
 
-传递响应式 ref 实现共享状态：
-
-```typescript
-function useSearch(query: Ref<string>) {
-  const results = ref([])
-
-  watch(query, async (q) => {
-    results.value = await fetchResults(q)
-  })
-
-  return { results }
-}
-
-function useSearchInput() {
-  const query = ref('')
-  const debouncedQuery = refDebounced(query, 300)
-
-  return { query, debouncedQuery }
-}
-
-// 用法 — 显式依赖
-const { query, debouncedQuery } = useSearchInput()
-const { results } = useSearch(debouncedQuery)
-```
+传入 ref/getter 保持依赖；接收方以 `MaybeRefOrGetter` 声明并在 watcher 内调用 `toValue`。完整代码见[接受 Ref 以保持响应性](feature-extraction.md#2-接受-ref-以保持响应性)。普通值只能提供快照，不能在调用后自动跟随原来源。
 
 ### 模式 3：组合式函数编排模式
 
-创建更高层级的组合式函数来组合多个功能：
+创建更高层级的组合式函数来组合多个功能。以下显式注入请求入口，统一参数构建；`load` 负责错误、竞态和清理，完整列表实现见 [SFC 重构示例](../examples/sfc-refactor.md)。
 
 ```typescript
-function useSearchWithPagination() {
-  const { searchQuery, searchResults, handleSearch } = useSearch()
-  const { currentPage, pageSize, changePage } = usePagination({
-    onPageChange: handleSearch
-  })
+import { ref } from 'vue'
+
+interface SearchParams { query: string; page: number; size: number }
+
+function useSearchWithPagination(load: (params: SearchParams) => Promise<void>) {
+  const searchQuery = ref('')
+  const currentPage = ref(1)
+  const pageSize = ref(20)
 
   const searchWithParams = () => {
-    return handleSearch({
+    return load({
       query: searchQuery.value,
       page: currentPage.value,
       size: pageSize.value
     })
   }
 
+  function changePage(page: number) {
+    currentPage.value = page
+    return searchWithParams()
+  }
+
+  function search() {
+    currentPage.value = 1
+    return searchWithParams()
+  }
+
   return {
-    searchQuery, searchResults,
+    searchQuery,
     currentPage, pageSize,
-    searchWithParams, changePage
+    searchWithParams, search, changePage
   }
 }
 ```
@@ -213,7 +141,7 @@ function useSearchWithPagination() {
 
 ```typescript
 // composables/events/useEmitt.ts
-import { onUnmounted } from 'vue'
+import { onScopeDispose } from 'vue'
 import { mittBus } from '@/utils/mitt'
 
 export function useEmitt() {
@@ -224,12 +152,12 @@ export function useEmitt() {
     listeners.push({ event, handler })
   }
 
-  function emit(event: string, ...args: any[]) {
-    mittBus.emit(event, ...args)
+  function emit(event: string, payload?: unknown) {
+    mittBus.emit(event, payload)
   }
 
-  // 组件卸载时自动解绑所有通过此 hook 注册的事件
-  onUnmounted(() => {
+  // 当前 scope 销毁时自动解绑；组件内等价于卸载时清理
+  onScopeDispose(() => {
     listeners.forEach(({ event, handler }) => {
       mittBus.off(event, handler)
     })
@@ -261,6 +189,8 @@ on('open-contextmenu', (data) => {
 // 多次调用 on() 注册多个监听器，全部会在卸载时清理
 ```
 
+> **keep-alive 场景**：被缓存的组件停用（`deactivated`）不会触发 `onScopeDispose`/`onUnmounted`。如果监听只应在页面可见时生效（滚动、快捷键、轮询），需要额外在 `onDeactivated` 暂停、`onActivated` 恢复；如果业务要求停用期间也接收数据更新，可以保留监听。不要统一要求“停用即解绑”。
+
 > 另见：[组合式函数设计模式 - 模式 3：生命周期感知](composable-design-patterns.md#模式-3生命周期感知) 了解 `useEmitt` 作为 Lifecycle-Aware 模式的完整设计原理。
 
 **何时使用事件总线 vs 回调：**
@@ -277,7 +207,7 @@ on('open-contextmenu', (data) => {
 
 ### 模式 5：Store 桥接用于共享状态
 
-当多个功能需要相同的 store 数据时，使用 Store 桥接组合式函数，而不是直接访问 store：
+多个功能读写同一 store 不构成必须增加桥接的理由。业务不变量可放在 store action；页面专属派生、跨 store 协作才按需用 composable。下面展示有额外职责的桥接，沿用项目 `WithOut` 约定；陌生项目用 `useAppStore()`（setup 同步调用）或显式 pinia 工厂。
 
 ```typescript
 // ✅ Good — Store 桥接提供统一接口
@@ -360,6 +290,8 @@ appStore.setSidebarCategories(...)
 
 ### 搜索 + 筛选 + 分页
 
+以下假设 useDataFetch 是手动 refetch 模式，不自行监听传入参数。若项目封装已自动监听，筛选事件只更新状态，不再显式 refetch；搜索与翻页也应按同一契约绑定。
+
 ```vue
 <script setup lang="ts">
 // 清晰的依赖链
@@ -430,7 +362,9 @@ const { submit, isSubmitting } = useFormSubmit({
 
 ### 模式 6：页面级编排（混合策略）
 
-**影响级别：MEDIUM** — 当页面组件有 8 个以上 `useXxx` 函数时，全部走参数注入会让声明区冗长，但全部靠闭包又会回到隐式依赖的混乱。需要一个"核心链显式 + 叶子函数宽松"的混合策略。
+**影响级别：MEDIUM** — 当页面组件功能区块很多（典型是中大型页面），全部走参数注入会让声明区冗长，但全部靠闭包又会回到隐式依赖的混乱。需要一个“核心链显式 + 叶子函数宽松”的混合策略。
+
+> 下文提到的“3 个以上函数调用”“8 个以上 useXxx”是**提醒信号**，不是架构规则。真正要判断的是：状态归属、变化原因、依赖方向、测试边界，以及拆分后是否降低理解成本。
 
 **问题所在：两种极端**
 
@@ -486,118 +420,63 @@ const { openOpsApprovalInfoModal } = useOpsApprovalInfoModal()
 
 **GOOD — 混合策略：核心链显式注入 + 叶子闭包**
 
+下例展示页面结构和弹窗引用类型；page-services 是项目依赖，需满足代码注释中的契约。列表请求实现参考[完整列表示例](../examples/sfc-refactor.md)，不在本节重复实现。
+
 ```vue
 <script setup lang="ts">
-// ============ 功能声明 ============
+import { reactive, ref } from 'vue'
+import { useTableList, submitApi } from './page-services'
 
-// Step 1：底层能力先声明
-const { dataSource, loading, columns, getTableList } = useTableList()
+// 项目边界：useTableList 提供 { dataSource, loading, error, getTableList }；
+// getTableList(params) 接收完整查询，内部处理最新请求、错误状态和销毁清理。
+interface Row { id: string }
+interface Query { pageNo: number; pageSize: number; keyword: string }
+interface ModalHandle { openModal: (row: Row) => void }
 
-// Step 2：核心链上的函数——依赖通过参数显式传入
-const { pageInfo, resetPageIndex, updatePageTotal } = usePagination()
-
-const { searchForm, handleSearch, resetForm } = useSearchForm({
-  getPageInfo: () => ({ pageNo: pageInfo.pageNo, pageSize: pageInfo.pageSize }),
-  getTableList,
-  resetPageIndex,
+const { dataSource, loading, error, getTableList } = useTableList()
+const pageInfo = reactive({ pageNo: 1, pageSize: 10 })
+const { searchForm, handleSearch } = useSearchForm({
+  getPageInfo: () => ({ ...pageInfo }),
+  resetPage: () => { pageInfo.pageNo = 1 },
+  load: getTableList,
 })
+const { modalRef, openModal, submit, submitError } = useRegistration()
 
-// Step 3：分页事件绑定核心函数
-const { onPageChange } = usePaginationEvent({
-  onPageChange: () => handleSearch(),
-})
-
-// Step 4：叶子函数——对 handleSearch 的调用可容忍闭包
-// 原因：它们都是一对一的关系（按钮点击 → 刷新列表），语义统一，不会混乱
-const { regisApplyModalRef, openRegisModal, submitData } = useRegisModal()
-const { regisPreviewModalRef, openPreviewModal, submitRegisApply } = usePreviewModal()
-const { operationApplyModalRef, openOperationModal, submitOperation } = useOperationModal()
-const { opsPreviewModalRef, openOpsPreviewModal, submitOpsApply } = useOpsPreviewModal()
-const { approvalModalRef, openApprovalModal, submitApproval } = useApprovalModal()
-const { opsApprovalModalRef, openOpsApprovalModal, submitOpsApproval } = useOpsApprovalModal()
-const { approvalInfoModalRef, openApprovalInfoModal } = useApprovalInfoModal()
-const { opsApprovalInfoModalRef, openOpsApprovalInfoModal } = useOpsApprovalInfoModal()
-
-// ============ 功能实现 ============
-
-function useTableList() {
-  const loading = ref(false)
-  const dataSource = ref([])
-
-  const getTableList = (params) => {
-    loading.value = true
-    fetchData(params)
-      .then((res) => { dataSource.value = res.data.list || [] })
-      .finally(() => { loading.value = false })
-  }
-
-  return { dataSource, loading, getTableList }
+function onPageChange(page: number) {
+  pageInfo.pageNo = page
+  return handleSearch()
 }
+void handleSearch() // 唯一初始请求入口；load 将错误存入 error
 
-function usePagination() {
-  const pageInfo = reactive({ pageNo: 1, pageSize: 10, total: 0 })
-  const resetPageIndex = () => { pageInfo.pageNo = 1 }
-  const updatePageTotal = (total) => { pageInfo.total = total }
-  return { pageInfo, resetPageIndex, updatePageTotal }
-}
-
-// ✅ 核心链：依赖通过参数显式传入
 function useSearchForm(deps: {
   getPageInfo: () => { pageNo: number; pageSize: number }
-  getTableList: (params: any) => void
-  resetPageIndex: () => void
+  resetPage: () => void
+  load: (query: Query) => Promise<void>
 }) {
-  const searchForm = ref({ keyword: '', timeRange: [] })
-
-  const queryParams = computed(() => ({
-    ...deps.getPageInfo(),
-    keyword: searchForm.value.keyword,
-  }))
-
-  const handleSearch = (resetPage = false) => {
-    if (resetPage) deps.resetPageIndex()
-    deps.getTableList(queryParams.value)
+  const searchForm = ref({ keyword: '' })
+  function handleSearch(resetPage = false) {
+    if (resetPage) deps.resetPage()
+    return deps.load({ ...deps.getPageInfo(), keyword: searchForm.value.keyword })
   }
-
-  const resetForm = () => {
-    searchForm.value = { keyword: '', timeRange: [] }
-    handleSearch(true)
-  }
-
-  handleSearch()
-  return { searchForm, handleSearch, resetForm }
+  return { searchForm, handleSearch }
 }
 
-function usePaginationEvent(deps: { onPageChange: () => void }) {
-  const onPageChange = () => deps.onPageChange()
-  return { onPageChange }
-}
-
-// ✅ 叶子函数：handleSearch 通过闭包引用——可以接受
-// 6 个 Modal 函数都是"提交成功 → 刷新列表"的同一模式，
-// 为它们各传一个 deps.onSearch 参数反而增加了样板代码
-function useRegisModal() {
-  const regisApplyModalRef = ref(null)
-  const openRegisModal = (row) => regisApplyModalRef.value.openModal(row)
-  const submitData = (row) => {
-    submitApi(row).then(() => {
-      handleSearch() // 闭包引用——可容忍
-    })
+// 叶子功能通过局部闭包复用刷新入口，初始化时不执行该闭包
+function useRegistration() {
+  const modalRef = ref<ModalHandle | null>(null)
+  const submitError = ref<unknown>(null)
+  const openModal = (row: Row) => modalRef.value?.openModal(row)
+  async function submit(row: Row) {
+    submitError.value = null
+    try {
+      await submitApi(row)
+      await handleSearch()
+    } catch (cause) {
+      submitError.value = cause
+    }
   }
-  return { regisApplyModalRef, openRegisModal, submitData }
+  return { modalRef, openModal, submit, submitError }
 }
-
-function useApprovalModal() {
-  const approvalModalRef = ref(null)
-  const openApprovalModal = (row) => approvalModalRef.value.openModal(row)
-  const submitApproval = (data) => {
-    approveApi(data).then(() => {
-      handleSearch() // 闭包引用——可容忍
-    })
-  }
-  return { approvalModalRef, openApprovalModal, submitApproval }
-}
-// ... 其余 Modal 函数结构相同，省略
 </script>
 ```
 
@@ -611,6 +490,8 @@ function useApprovalModal() {
 | 一对一关系：按钮 → 打开弹窗 | ⚠️ 可容忍闭包 | 不会出现循环依赖 |
 | 同一种模式重复 N 次（Modal 提交 → 刷新列表）| ⚠️ 可容忍闭包 | 语义统一，全传参数反而冗长 |
 
+> 表中的数量是经验信号，不是硬性规则。一个只被调用一次、但改变了页面核心状态的操作，仍应显式注入；一个被多次调用、但完全局部于单一 feature 的 helper，也可以保留在 feature 内部。
+
 **识别核心链的方法：**
 
 1. 画出函数调用图：谁调用了谁
@@ -621,7 +502,7 @@ function useApprovalModal() {
 **验证清单：**
 
 - [ ] 核心链上的函数可通过参数独立测试
-- [ ] 叶子函数的闭包依赖不超过 2 个外部变量
+- [ ] 叶子函数的闭包依赖局部、可追踪，不按变量数量机械拆分
 - [ ] 没有循环依赖（A 闭包引用 B，B 也闭包引用 A）
 - [ ] 核心链的依赖方向清晰（单向，从上到下）
 

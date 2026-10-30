@@ -37,16 +37,27 @@ openclaw skills install vue-composition-api-best-practices
 
 ## Usage
 
-For most reliable results, prefix your prompt with `use vue skill`:
+For the most reliable result, name the skill explicitly:
 
 ```
-Use vue skill, <your prompt here>
+Use the vue-composition-api-best-practices skill to <your task>
 ```
 
-This explicitly triggers the skill and ensures the AI follows the documented patterns. Without the prefix, skill triggering may be inconsistent depending on how closely your prompt matches the skill's description keywords.
+A vague prefix such as `use vue skill` relies on description matching and may be less reliable.
+
+### Adopt by project
+
+This is a **reference library**, not a one-size-fits-all standard:
+
+- Projects that already share the conventions can adopt everything (11-step order, in-SFC `useXxx`, `WithOut`, `useEmitt`)
+- Projects without them still benefit from the universal parts (typed props/emits, cleanup, request races, `storeToRefs`, `shallowRef`)
+- Prefer existing conventions; new projects, modules without conventions, or explicit user requests may adopt patterns according to their responsibilities and complexity
+- Keep local fixes minimal without adding unrelated conventions; each chosen pattern must still meet its runtime and lifecycle requirements
 
 ## Available Skills
 
 | Skill | When to use | Description |
 |-------|-------------|-------------|
-| **vue-composition-api-best-practices** | Vue 3 + Composition API + TypeScript | SFC code organization (11-step order), useXxx patterns, composable design (5 patterns), Pinia store integration (Store Without pattern), cross-feature dependency management, reactivity & performance optimization |
+| **vue-composition-api-best-practices** | Vue 3 + Composition API + TypeScript | Reactivity correctness, request races and cleanup, props/model contracts, SSR and Pinia instance boundaries; optional composable design, performance guidance and team code organization conventions |
+
+Maintenance checks: run `npm ci` and `npm test` for document structure and selected example compilation/behavior. Golden inputs intentionally contain defects; evaluate agent outputs separately using the [case checklist](skills/vue-composition-api-best-practices/examples/golden/README.md). Passing automated tests does not mean the agent evaluation has run.

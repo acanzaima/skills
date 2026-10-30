@@ -28,7 +28,7 @@ src/composables/
 
 **通用规则**：
 - 按功能域划分子目录（如 `business/`、`dom/`、`infrastructure/`，或沿用项目已有的目录）
-- 每个文件一个 composable，文件名即函数名
+- 默认按职责组织文件；紧密相关的小函数可同文件，不把一函数一文件作为正确性要求
 - 函数名以 `use` 开头
 
 ---
@@ -41,24 +41,36 @@ src/composables/
 
 ```typescript
 // composables/business/useNetwork.ts
-import { ref } from 'vue'
+import { onScopeDispose, ref } from 'vue'
 
 export function useNetwork() {
-  const isOnline = ref(navigator.onLine)
+  // 避免服务端访问 navigator；这不保证两端初始渲染一致，见下方边界
+  const isOnline = ref(
+    typeof navigator === 'undefined' ? true : navigator.onLine
+  )
 
-  const updateOnline = () => (isOnline.value = navigator.onLine)
+  if (typeof window !== 'undefined') {
+    const updateOnline = () => (isOnline.value = navigator.onLine)
 
-  window.addEventListener('online', updateOnline)
-  window.addEventListener('offline', updateOnline)
+    window.addEventListener('online', updateOnline)
+    window.addEventListener('offline', updateOnline)
 
-  // 注意：此处未自动清理，因为网络状态是全局性的
-  // 如果需要组件级清理，参考 Pattern 3
+    // 信息来源是全局的，但这里的 ref 和监听器属于当前调用方
+    onScopeDispose(() => {
+      window.removeEventListener('online', updateOnline)
+      window.removeEventListener('offline', updateOnline)
+    })
+  }
 
   return { isOnline }
 }
 ```
 
-**特征**：维护全局状态，通常不需要组件级清理。
+**特征**：
+- 每次调用创建独立状态和监听器，因此在 `setup()` 或 `effectScope` 内使用，并由该 scope 负责清理
+- 如果确实需要应用级单例，应把 ref 和监听器放到模块级、只初始化一次，并提供显式销毁入口；不要靠“网络状态是全局的”来省略清理
+- 在组件外调用（没有 scope）时，`onScopeDispose` 不会生效，需要调用方自行管理生命周期
+- SSR 边界：服务端默认值与客户端实际网络状态可能不同。如果模板首屏依赖 `isOnline`，两端应使用相同初始值，并在 `onMounted` 后同步实际状态；或把相关 UI 限定为客户端渲染。
 
 ### 模式 2：Store 桥接
 
@@ -72,7 +84,8 @@ import { useBusinessStoreWithOut } from '@/store/modules/business'
 export function usePageIcon() {
   const businessStore = useBusinessStoreWithOut()
 
-  const pageIcon = computed(() => businessStore.getPageIcon)
+  // 当前页面的图标列表（简化示例；带分页/新增/删除的完整版见 use-function-pattern）
+  const curPageIcons = computed(() => businessStore.getPageIcons)
 
   function addPageIcon(icon: IconItem) {
     businessStore.addPageIcon(icon)
@@ -82,7 +95,25 @@ export function usePageIcon() {
     businessStore.removePageIcon(id)
   }
 
-  return { pageIcon, addPageIcon, removePageIcon }
+  return { curPageIcons, addPageIcon, removePageIcon }
+}
+```
+
+```typescript
+// 需要测试隔离时，提供接受 pinia 的工厂版本
+import { computed } from 'vue'
+import type { Pinia } from 'pinia'
+import { useBusinessStore } from '@/store/modules/business'
+
+export function createPageIcon(pinia: Pinia) {
+  const businessStore = useBusinessStore(pinia)
+  const curPageIcons = computed(() => businessStore.getPageIcons)
+
+  function addPageIcon(icon: IconItem) {
+    businessStore.addPageIcon(icon)
+  }
+
+  return { curPageIcons, addPageIcon }
 }
 ```
 
@@ -91,7 +122,9 @@ export function usePageIcon() {
 - 对外暴露语义化接口，隐藏 store action 细节
 - 不维护自身状态，仅转发 store 数据
 
-**何时使用**：当多个组件需要以相同方式访问同一 store 数据时。
+**何时使用**：当多个组件需要以相同方式访问同一 store 数据，且这层封装确实新增了职责（组合多个 action、维护一致性、做数据转换）时。仅仅转发 getter/action 的包装，未必优于直接使用 store。
+
+> 如果桥接内部使用 `WithOut`（绑定全局 pinia），测试中的 `setActivePinia(createPinia())` 不会提供隔离；需要可测试时，优先让桥接接受 `pinia` 参数或提供工厂版本。
 
 ### 模式 3：生命周期感知
 
@@ -99,7 +132,7 @@ export function usePageIcon() {
 
 ```typescript
 // composables/events/useEmitt.ts
-import { onUnmounted } from 'vue'
+import { onScopeDispose } from 'vue'
 import { mittBus } from '@/utils/mitt'
 
 export function useEmitt() {
@@ -110,12 +143,12 @@ export function useEmitt() {
     listeners.push({ event, handler })
   }
 
-  function emit(event: string, ...args: any[]) {
-    mittBus.emit(event, ...args)
+  function emit(event: string, payload?: unknown) {
+    mittBus.emit(event, payload)
   }
 
-  // 组件卸载时自动解绑所有通过此 hook 注册的事件
-  onUnmounted(() => {
+  // 当前 scope 销毁时自动解绑（组件内等价于卸载时）
+  onScopeDispose(() => {
     listeners.forEach(({ event, handler }) => {
       mittBus.off(event, handler)
     })
@@ -127,13 +160,14 @@ export function useEmitt() {
 ```
 
 **特征**：
-- 使用 `onUnmounted` 自动清理
+- 使用 `onScopeDispose` 自动清理（组件内等价于卸载时）
 - 内部维护清理队列
 - 防止内存泄漏
+- keep-alive 页面停用不会触发清理；如果监听只应在可见时生效，需配合 `onDeactivated`/`onActivated`
 
 **何时使用**：涉及事件监听、定时器、DOM 事件等需要清理的副作用。
 
-> 另见：[跨功能依赖 - 模式 4：事件总线模式](cross-feature-dependencies.md#模式-4事件总线模式适用于复杂的多对多场景) 了解此模式在跨组件通信中的实际应用。
+> 另见：[跨功能依赖 - 模式 4：事件总线模式](cross-feature-dependencies.md#模式-4事件总线模式复杂通知的备选方案) 了解此模式在跨组件通信中的实际应用。
 
 ### 模式 4：异步资源
 
@@ -141,28 +175,29 @@ export function useEmitt() {
 
 ```typescript
 // composables/infrastructure/useLocalForage.ts
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import localforage from 'localforage'
 
 export function useLocalForage(storeName: string) {
   const store = localforage.createInstance({ name: storeName })
-  const loading = ref(false)
+  const pending = ref(0)
+  const loading = computed(() => pending.value > 0)
 
   async function getItem<T>(key: string): Promise<T | null> {
-    loading.value = true
+    pending.value++
     try {
       return await store.getItem<T>(key)
     } finally {
-      loading.value = false
+      pending.value--
     }
   }
 
   async function setItem<T>(key: string, value: T): Promise<void> {
-    loading.value = true
+    pending.value++
     try {
       await store.setItem(key, value)
     } finally {
-      loading.value = false
+      pending.value--
     }
   }
 
@@ -173,6 +208,7 @@ export function useLocalForage(storeName: string) {
 **特征**：
 - 提供 `loading` 状态
 - `try/finally` 保证状态重置
+- 并行操作用 pending 计数，任意任务未完成时 loading 保持 true；不使用搜索场景的“最新请求覆盖”契约
 - 支持泛型返回值
 
 **何时使用**：封装 IndexedDB、fetch、文件读取等异步操作。
@@ -183,17 +219,20 @@ export function useLocalForage(storeName: string) {
 
 ```typescript
 // composables/business/useDesign.ts
-import { useAppStoreWithOut } from '@/store/modules/app'
+import variables from '@/styles/global.module.less'
 
-export function useDesign(scope: string) {
-  const appStore = useAppStoreWithOut()
+export function useDesign() {
+  const lessVariables = variables
 
-  const prefixCls = computed(() => `${appStore.getPrefixCls}-${scope}`)
-  const variables = computed(() => ({
-    '--prefix-cls': prefixCls.value,
-  }))
+  const getPrefixCls = (scope: string) => {
+    return `${lessVariables.namespace}-${scope}`
+  }
 
-  return { prefixCls, variables }
+  return {
+    variables: lessVariables,
+    simplePrefixCls: lessVariables.miNamespace,
+    getPrefixCls
+  }
 }
 ```
 
@@ -213,7 +252,7 @@ export function useScrollTo() {
 ```
 
 **特征**：
-- 纯函数式，无副作用
+- 不维护响应式状态；DOM 滚动仍是副作用，不属于纯函数
 - 参数决定返回值
 - 不需要清理
 
@@ -262,16 +301,16 @@ export function useSuggestion(engine: string, options?: SuggestionOptions) {
 // ✅ GOOD: 只暴露必要的接口
 export function usePageIcon() {
   const businessStore = useBusinessStoreWithOut()
-  const pageIcon = computed(() => businessStore.getPageIcon)
+  const curPageIcons = computed(() => businessStore.getPageIcons)
 
   function addPageIcon(icon: IconItem) { businessStore.addPageIcon(icon) }
   function removePageIcon(id: string) { businessStore.removePageIcon(id) }
 
-  return { pageIcon, addPageIcon, removePageIcon }
+  return { curPageIcons, addPageIcon, removePageIcon }
 }
 
 // ❌ BAD: 暴露了整个 store
-export function usePageIcon() {
+export function usePageIconRaw() {
   const businessStore = useBusinessStoreWithOut()
   return { businessStore } // 调用方可随意修改 store
 }
@@ -333,11 +372,17 @@ export function useEngine(engineType: string) { ... }
 ```typescript
 // 一般不需要显式声明返回类型
 export function usePageIcon() {
-  // TypeScript 自动推断返回 { pageIcon: ComputedRef<...>, addPageIcon: (...) => void, ... }
-  return { pageIcon, addPageIcon, removePageIcon }
+  const businessStore = useBusinessStoreWithOut()
+  const curPageIcons = computed(() => businessStore.getPageIcons)
+
+  function addPageIcon(icon: IconItem) { businessStore.addPageIcon(icon) }
+  function removePageIcon(id: string) { businessStore.removePageIcon(id) }
+
+  // TypeScript 自动推断返回 { curPageIcons: ComputedRef<...>, addPageIcon: (...) => void, ... }
+  return { curPageIcons, addPageIcon, removePageIcon }
 }
 
-// 如果其他模块需要使用返回值类型，用 Extract 类型工具
+// 如果其他模块需要使用返回值类型，用 ReturnType 类型工具
 export type PageIconReturn = ReturnType<typeof usePageIcon>
 ```
 
@@ -349,26 +394,12 @@ export type PageIconReturn = ReturnType<typeof usePageIcon>
 
 | 场景 | 策略 | 原因 |
 |------|------|------|
-| 数据获取 | 静默失败 + 降级 | 不应阻塞 UI |
+| 非关键搜索建议等 | 可降级，保留必要的诊断渠道 | 不阻塞核心操作 |
+| 业务列表/详情获取 | 暴露 error、重试与空数据的区别 | 不能把加载失败伪装为没有数据 |
 | 关键操作 | 抛出异常 | 必须让调用方感知 |
-| 生命周期清理 | 静默失败 | 卸载时不应抛错 |
+| 生命周期清理 | 尽力释放所有资源并记录异常 | 不因一个清理失败跳过其余资源 |
 
 ```typescript
-// 数据获取：静默失败 + 降级
-export function useSuggestion(engine: string) {
-  const suggestions = ref<string[]>([])
-
-  async function fetchSuggestion(keyword: string) {
-    try {
-      suggestions.value = await doFetch(keyword)
-    } catch {
-      suggestions.value = [] // 降级为空列表
-    }
-  }
-
-  return { suggestions, fetchSuggestion }
-}
-
 // 关键操作：抛出异常
 export function useBackup() {
   async function exportData(): Promise<Blob> {
@@ -417,11 +448,11 @@ const openDialog = () => (dialogVisible.value = true)
 
 ---
 
-## 8. 完整示例：生产级 Composable
+## 8. 完整示例：带并发处理的 Composable
 
 ```typescript
 // composables/business/useSuggestion.ts
-import { ref } from 'vue'
+import { onScopeDispose, ref } from 'vue'
 import { useEngine } from './useEngine'
 import { SUGGESTION_TIMEOUT } from '@/constants'
 
@@ -438,32 +469,53 @@ export function useSuggestion(options?: SuggestionOptions) {
   const suggestions = ref<string[]>([])
   const loading = ref(false)
   let controller: AbortController | null = null
+  let requestId = 0
 
   async function fetch(keyword: string) {
-    if (!keyword.trim()) {
+    const q = keyword.trim()
+    const current = ++requestId
+
+    // 先让旧请求失效，再处理空输入：
+    // 否则清空搜索框后，旧请求仍可能回填过期建议
+    controller?.abort()
+    controller = null
+
+    if (!q) {
       suggestions.value = []
+      loading.value = false
       return
     }
 
-    controller?.abort()
-    controller = new AbortController()
+    const ac = new AbortController()
+    controller = ac
     loading.value = true
 
     try {
       // 通过可信 API 或后端代理获取建议，避免在客户端执行第三方脚本。
-      const data = await currentEngine.value.fetchSuggestions(keyword, {
-        signal: controller.signal,
+      const data = await currentEngine.value.fetchSuggestions(q, {
+        signal: ac.signal,
         timeout
       })
+
+      // 只有最新请求可以提交结果；防止请求忽略 abort 时回填旧数据
+      if (current !== requestId) return
       suggestions.value = data.slice(0, maxResults)
     } catch (error) {
-      if ((error as DOMException).name !== 'AbortError') {
+      if ((error as DOMException).name !== 'AbortError' && current === requestId) {
         suggestions.value = []
       }
     } finally {
-      loading.value = false
+      // 旧请求的 finally 不能改掉新请求的 loading
+      if (current === requestId) loading.value = false
     }
   }
+
+  // 组件卸载或 scope 销毁时取消在途请求
+  onScopeDispose(() => {
+    requestId++
+    controller?.abort()
+    controller = null
+  })
 
   return { suggestions, loading, fetch }
 }
@@ -472,22 +524,25 @@ export function useSuggestion(options?: SuggestionOptions) {
 这个示例综合了多种模式：
 - **Options 模式**：可配置超时和最大结果数
 - **异步资源**：loading 状态管理
+- **并发正确性**：先失效旧请求，再用 request id 只允许最新请求提交结果和修改 loading
 - **安全边界**：通过可信 API 或后端代理获取第三方建议，不在客户端注入远程脚本
 - **最小暴露**：只返回 suggestions、loading、fetch
-- **错误处理**：超时降级为空列表
+- **错误处理**：超时降级为空列表；销毁时取消在途请求
+
+> `AbortController` + `try/finally` 本身不足以处理竞态：被取消的请求也会进入 `finally`。必须配合“当前请求标识”或“只有 controller 仍是自己时才更新状态”的判断。
 
 ---
 
 ## 9. 测试 Composable
 
-Composable 是纯函数（返回响应式状态 + 方法），非常适合单元测试。推荐使用 **Vitest + @vue/test-utils**。
+Composable 不是“纯函数”：它可能注册生命周期、监听器和异步副作用。但它的公开接口（返回的 ref/computed/方法）通常可以独立测试。推荐使用 **Vitest + @vue/test-utils**。响应式 effect 和 `onScopeDispose` 可用 `effectScope` 隔离；含组件生命周期或注入依赖时，使用测试宿主组件实际挂载和卸载。
 
 ### 测试纯计算型 Composable
 
 ```typescript
 // composables/business/__tests__/useDesign.test.ts
 import { describe, it, expect } from 'vitest'
-import { useDesign } from '../web/useDesign'
+import { useDesign } from '../useDesign'
 
 describe('useDesign', () => {
   it('should generate correct prefix class', () => {
@@ -505,11 +560,13 @@ describe('useDesign', () => {
 
 ### 测试有状态 Composable
 
+> 下面测试对应[功能提取中的 useEngine](feature-extraction.md#模式-2store-桥接组合式函数)，它调用标准 `useAppStore()`，可用 active pinia 隔离。若实际实现绑定 `WithOut` 全局实例，应先改成显式 pinia 参数/工厂再测试，不能照抄这个 beforeEach。
+
 ```typescript
 // composables/business/__tests__/useEngine.test.ts
 import { describe, it, expect, beforeEach } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
-import { useEngine } from '../web/useEngine'
+import { useEngine } from '../useEngine'
 
 describe('useEngine', () => {
   beforeEach(() => {
@@ -543,23 +600,38 @@ describe('useEngine', () => {
 ```typescript
 // composables/business/__tests__/useNetwork.test.ts
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { useNetwork } from '../web/useNetwork'
+import { effectScope } from 'vue'
+import { useNetwork } from '../useNetwork'
 
 describe('useNetwork', () => {
   afterEach(() => {
     vi.restoreAllMocks()
   })
 
-  it('should reflect online status', async () => {
+  it('should update when going offline', () => {
     vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(true)
-    const { isOnline } = useNetwork()
+
+    const scope = effectScope()
+    const { isOnline } = scope.run(() => useNetwork())!
+
     expect(isOnline.value).toBe(true)
+
+    vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false)
+    window.dispatchEvent(new Event('offline'))
+    expect(isOnline.value).toBe(false)
+
+    scope.stop()
   })
 
-  it('should update when going offline', async () => {
-    vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false)
-    const { isOnline } = useNetwork()
-    expect(isOnline.value).toBe(false)
+  it('should remove listeners when the scope is disposed', () => {
+    const removeSpy = vi.spyOn(window, 'removeEventListener')
+    const scope = effectScope()
+
+    scope.run(() => useNetwork())
+    scope.stop()
+
+    expect(removeSpy).toHaveBeenCalledWith('online', expect.any(Function))
+    expect(removeSpy).toHaveBeenCalledWith('offline', expect.any(Function))
   })
 })
 ```
@@ -568,8 +640,11 @@ describe('useNetwork', () => {
 
 ```typescript
 // composables/infrastructure/__tests__/useLocalForage.test.ts
+// 需要 IndexedDB 环境：在测试 setup 中引入 fake-indexeddb/auto，
+// 或把该测试放到真实浏览器（Playwright/Vitest browser mode）中运行。
+import 'fake-indexeddb/auto'
 import { describe, it, expect } from 'vitest'
-import { useLocalForage } from '../web/useLocalForage'
+import { useLocalForage } from '../useLocalForage'
 
 describe('useLocalForage', () => {
   it('should get and set items', async () => {
@@ -592,21 +667,21 @@ describe('useLocalForage', () => {
 
 ### 测试 Store Bridge Composable
 
-Store Bridge 模式的 composable 测试关键是初始化 pinia：
+Store Bridge 的测试隔离取决于它如何拿到 pinia：
+
+- 内部使用 `useXxxStore(pinia)` 或工厂版本 → 测试传入 `createPinia()`
+- 内部使用 `useXxxStoreWithOut()`（绑定全局实例）→ `setActivePinia(createPinia())` **不会隔离**，应改为工厂/参数注入，或只测试不依赖 store 的纯逻辑
 
 ```typescript
 // composables/business/__tests__/usePageIcon.test.ts
-import { describe, it, expect, beforeEach } from 'vitest'
-import { setActivePinia, createPinia } from 'pinia'
-import { usePageIcon } from '../web/usePageIcon'
+import { describe, it, expect } from 'vitest'
+import { createPinia } from 'pinia'
+import { createPageIcon } from '../usePageIcon'
 
-describe('usePageIcon', () => {
-  beforeEach(() => {
-    setActivePinia(createPinia())
-  })
-
+describe('createPageIcon', () => {
   it('should add page icon', () => {
-    const { addPageIcon, curPageIcons } = usePageIcon()
+    const pinia = createPinia()
+    const { addPageIcon, curPageIcons } = createPageIcon(pinia)
 
     addPageIcon({
       label: '测试',
@@ -626,11 +701,13 @@ describe('usePageIcon', () => {
 
 | 原则 | 说明 |
 |------|------|
-| 每个 test 独立 | 用 `beforeEach` + `setActivePinia(createPinia())` 重置状态 |
+| 每个 test 独立 | 优先给 composable 传 `createPinia()` 的工厂；使用全局 store 时，`setActivePinia` 对 `WithOut` 无效 |
 | 只测试公开接口 | 只测 `return` 的值和方法，不测内部实现 |
 | Mock 副作用 | 网络请求、浏览器 API 用 `vi.spyOn` / `vi.mock` 隔离 |
-| 覆盖边界情况 | 空输入、异常路径、极限值 |
-| 测试异步行为 | 用 `async/await` + 断言 `loading` 状态变化 |
+| 覆盖边界情况 | 空输入、异常路径、极限值、请求竞态（清空输入、连续请求、卸载） |
+| 测试异步行为 | 用 `async/await` + 断言 `loading` 状态变化；用可控 Promise 控制完成顺序 |
+| 作用域隔离 | `watch`、`computed`、`onScopeDispose` 可用 `effectScope()` 包裹，结束时 `scope.stop()` |
+| 组件生命周期与注入 | 含 `onMounted`、`onUnmounted` 或组件注入依赖时，用测试宿主组件调用 composable，提供所需依赖并实际 mount/unmount；独立 `effectScope` 不创建组件实例，也不触发这些钩子 |
 
 **目录结构建议：**
 

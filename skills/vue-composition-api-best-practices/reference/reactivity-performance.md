@@ -21,7 +21,7 @@ Vue 3 Composition API 响应式与性能优化最佳实践。
 │        └── 否 → 数据层级深？
 │                 ├── 浅层即可 → shallowRef
 │                 └── 需要深层 → ref（或 reactive）
-└── 否 → 不需要响应式 → 普通变量 / shallowRef
+└── 否 → 普通变量；需要防止进入响应式图后被代理时才 markRaw
 ```
 
 ### 对比表
@@ -29,7 +29,7 @@ Vue 3 Composition API 响应式与性能优化最佳实践。
 | API | 响应深度 | 触发更新方式 | 适用场景 |
 |-----|---------|-------------|---------|
 | `ref` | 深层 | 自动 | 通用场景，对象属性变更需触发更新 |
-| `shallowRef` | 浅层（.value） | 手动 `triggerRef` | 大型对象、动态组件、性能敏感场景 |
+| `shallowRef` | 浅层（.value） | 替换 .value；原地深层修改可用 `triggerRef` | 大型对象、动态组件、性能敏感场景 |
 | `reactive` | 深层 | 自动 | 不需要重新赋值的对象 |
 
 ### ⚠️ reactive 的局限性
@@ -78,12 +78,14 @@ function usePage() {
 ```
 
 ```typescript
-// ❌ BAD: 使用 ref 对组件对象做深层响应式，无意义且浪费性能
+// ❌ BAD: 用 ref 包组件对象会创建深层响应式代理
 function usePage() {
-  const activeCom = ref()  // 会递归遍历组件对象的所有属性
+  const activeCom = ref() // 组件定义对象不需要深层响应式
   // ...
 }
 ```
+
+> 更正一个常见说法：`ref()` 不会在创建时“递归遍历所有属性”；Vue 3 的 `reactive`/`ref` 使用惰性代理。对动态组件用 `shallowRef` 的真正理由是：组件定义对象不需要深层响应式，深层代理既无意义，也可能带来额外的代理开销和身份差异。
 
 ### shallowRef 手动触发更新
 
@@ -101,6 +103,13 @@ list.value.push('d')
 triggerRef(list)
 ```
 
+> 不要把“大对象”机械地换成 `shallowRef`。先确认数据更新方式：
+> - 整体替换对象/数组 → `shallowRef` 合适；
+> - 需要原地修改嵌套字段（可编辑表格、树节点、复杂表单）→ 用 `ref`，或统一改成不可变更新后再替换；
+> - 只是偶尔修改 → `shallowRef` + `triggerRef`，但要清楚每次手动触发的范围。
+>
+> 换用 `shallowRef` 后，嵌套修改不再触发界面更新，这是行为变化，不是纯性能优化。
+
 ### markRaw — 标记对象永不转为响应式
 
 当确定某个对象不需要响应式时（如第三方库实例、大型静态数据），用 `markRaw` 标记它。这可以防止 Vue 的响应式系统意外地将其深层代理，避免性能浪费：
@@ -108,10 +117,7 @@ triggerRef(list)
 ```typescript
 import { markRaw, reactive, shallowRef } from 'vue'
 
-// ❌ BAD: 第三方库实例被意外代理
-const mapInstance = new Map() // 被 reactive 包装，产生大量 proxy 开销
-
-// ✅ GOOD: 标记为永不代理
+// 普通 new Map() 本身不会创建代理；需要进入 reactive 又不希望代理时标记
 const mapInstance = markRaw(new Map())
 const state = reactive({
   map: mapInstance // map 本身不会被代理
@@ -129,10 +135,12 @@ const appState = shallowRef({
 **何时使用 `markRaw`：**
 - 第三方库实例（如 Leaflet 地图、Monaco Editor、ECharts 实例）
 - 大型静态数据对象（如国家/地区列表、字典数据）
-- 已经冻结的数据（`Object.freeze`）
-- 在 `pinia` persist 中不需要持久化的运行时对象
+- 已经冻结的数据（`Object.freeze`）通常无需再 markRaw
+- 明确不会被 UI 修改、且不希望被深层代理的运行时对象
 
 **⚠️ 注意：** `markRaw` 是永久性的，标记后无法撤销。被标记的对象在 `reactive`/`ref` 中会被视为非响应式。
+
+标记只作用于对象自身；把它内部未标记的子对象单独放进另一个 reactive 对象，子对象仍可能被代理。不要假定整棵对象树都被永久排除。
 
 ---
 
@@ -143,6 +151,8 @@ const appState = shallowRef({
 - 只在依赖变化时重新计算
 - 多次访问只计算一次
 - 适合派生状态和昂贵计算
+
+Vue 3.4+ 的 computed 结果未变化时，不再触发依赖它的 effect；但每次返回新对象会改变引用，无法获得这项收益。只有测量发现热点时再考虑稳定结果引用，不为此到处添加深比较。参见[官方 computed 稳定性说明](https://vuejs.org/guide/best-practices/performance.html#computed-stability)。
 
 ### 何时用 computed vs 方法
 
@@ -213,6 +223,8 @@ watch(
 
 ### 常用选项
 
+直接监听 reactive 对象会隐式深层监听；getter 返回对象通常只追踪替换，除非显式 deep。Vue 3.5+ 可用 `deep: 1` 等数值限制遍历深度，深度应按目标结构选择。`immediate: true` 与 `once: true` 同用时，立即调用会消耗这一次执行。
+
 ```typescript
 watch(source, callback, {
   immediate: true,  // 创建时立即执行一次
@@ -224,13 +236,19 @@ watch(source, callback, {
 
 ### watch 中清理副作用
 
+以下是清理注册片段，省略 loading；完整的“最新请求生效”状态管理见[异步基准](composable-design-patterns.md#8-完整示例带并发处理的-composable)。
+
 ```typescript
 watch(id, (newId, oldId, onCleanup) => {
   const controller = new AbortController()
 
   fetch(`/api/user/${newId}`, { signal: controller.signal })
-    .then(res => res.json())
-    .then(data => { user.value = data })
+    .then(res => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      return res.json()
+    })
+    .then(data => { if (!controller.signal.aborted) user.value = data })
+    .catch(error => { if (!controller.signal.aborted) requestError.value = error })
 
   // id 变化时取消上一次请求
   onCleanup(() => controller.abort())
@@ -249,8 +267,12 @@ watchEffect(() => {
   const controller = new AbortController()
 
   fetch(`/api/user/${userId.value}`, { signal: controller.signal })
-    .then(res => res.json())
-    .then(data => { user.value = data })
+    .then(res => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      return res.json()
+    })
+    .then(data => { if (!controller.signal.aborted) user.value = data })
+    .catch(error => { if (!controller.signal.aborted) requestError.value = error })
 
   // userId 变化或组件卸载时自动取消请求
   onWatcherCleanup(() => controller.abort())
@@ -264,9 +286,14 @@ watchEffect(() => {
 | 可用性 | Vue 3.0+ | Vue 3.5+ |
 | 清理触发时机 | 下次执行前 + 卸载时 | 下次执行前 + 卸载时 |
 | 使用方式 | 从 `watch` / `watchEffect` 回调参数接收 | 从 `vue` 导入后在当前 watcher 内调用 |
+| await 边界 | 绑定 watcher，不受同样的同步调用限制；仍应尽早注册 | 必须在 watcher 同步执行期间注册，不能放在 await 后 |
 | 适用场景 | 简单 watcher 内联清理 | 清理逻辑需要抽取到辅助函数或减少参数传递 |
 
 **什么时候使用 `onWatcherCleanup`：** 当清理逻辑需要放进内部辅助函数、组合式函数或更深的调用栈时，它比层层传递 `onCleanup` 参数更清晰。对于简单的内联 watcher，继续使用 `onCleanup` 参数也完全可以。
+
+辅助函数也必须在当前 watcher 的同步调用链中执行。`watchEffect(async () => ...)` 只追踪第一个 await 前读取的依赖；普通异步回调中新建的 watcher 不能假定由组件自动清理，应保存 stop 或使用明确的 scope。
+
+Vue 3.5+ 的 watch handle 支持 `pause()` / `resume()` / `stop()`。暂停只控制 watcher 的响应，不会取消已启动的请求、定时器或事件监听。KeepAlive 页面如需暂停轮询，仍应在 `onDeactivated` 停止计时/取消请求，在 `onActivated` 按契约恢复，不能用 `pause()` 代替资源清理。
 
 ---
 
@@ -275,21 +302,21 @@ watchEffect(() => {
 ### 组件级自动清理
 
 ```typescript
-// ✅ GOOD: 在 composable 中使用生命周期钩子自动清理
-import { onUnmounted } from 'vue'
+// ✅ GOOD: 在 composable 中使用 scope 清理
+import { onScopeDispose } from 'vue'
 import { mittBus } from '@/utils/mitt'
 
 export function useEmitt() {
-  const listeners: Array<{ event: string; handler: Function }> = []
+  const listeners: Array<{ event: string; handler: (...args: any[]) => void }> = []
 
-  function on(event: string, handler: Function) {
-    mittBus.on(event, handler as any)
+  function on(event: string, handler: (...args: any[]) => void) {
+    mittBus.on(event, handler)
     listeners.push({ event, handler })
   }
 
-  onUnmounted(() => {
+  onScopeDispose(() => {
     listeners.forEach(({ event, handler }) => {
-      mittBus.off(event, handler as any)
+      mittBus.off(event, handler)
     })
     listeners.length = 0
   })
@@ -298,19 +325,24 @@ export function useEmitt() {
 }
 ```
 
-> 另见：[组合式函数设计模式 - 模式 3](composable-design-patterns.md#模式-3生命周期感知) 和 [跨功能依赖 - 模式 4](cross-feature-dependencies.md#模式-4事件总线模式适用于复杂的多对多场景) 了解 `useEmitt` 的更多使用场景。
+> 另见：[组合式函数设计模式 - 模式 3](composable-design-patterns.md#模式-3生命周期感知) 和 [跨功能依赖 - 模式 4](cross-feature-dependencies.md#模式-4事件总线模式复杂通知的备选方案) 了解 `useEmitt` 的更多使用场景。
 
 ### DOM 事件清理
 
 ```typescript
 // ✅ 使用 VueUse 的 useEventListener 自动清理
 import { useEventListener } from '@vueuse/core'
+import { onMounted, ref } from 'vue'
 
 export function useNetwork() {
-  const isOnline = ref(navigator.onLine)
-  // 自动在卸载时移除监听
-  useEventListener(window, 'online', () => (isOnline.value = true))
-  useEventListener(window, 'offline', () => (isOnline.value = false))
+  const isOnline = ref(true)
+  onMounted(() => {
+    isOnline.value = navigator.onLine
+  })
+  // 在组件 setup 内同步注册，服务端目标为 undefined；首屏值两端一致
+  const target = typeof window === 'undefined' ? undefined : window
+  useEventListener(target, 'online', () => (isOnline.value = true))
+  useEventListener(target, 'offline', () => (isOnline.value = false))
   return { isOnline }
 }
 ```
@@ -319,6 +351,8 @@ export function useNetwork() {
 
 ```typescript
 // 对于不支持生命周期钩子的场景，提供 stop 函数
+import { getCurrentScope, onScopeDispose } from 'vue'
+
 export function useInterval(fn: () => void, delay: number) {
   let timer: ReturnType<typeof setInterval> | null = null
 
@@ -328,17 +362,20 @@ export function useInterval(fn: () => void, delay: number) {
   }
 
   function stop() {
-    if (timer) {
+    if (timer !== null) {
       clearInterval(timer)
       timer = null
     }
   }
 
-  onUnmounted(stop)
+  // 组件卸载 / effectScope 销毁时清理；组件内也可用 onUnmounted
+  if (getCurrentScope()) onScopeDispose(stop)
 
   return { start, stop }
 }
 ```
+
+组件外调用者必须显式 `stop()`。3.5+ 的 `onScopeDispose(fn, true)` 只抑制“无 active scope”警告，不会凭空创建清理归属。
 
 ---
 
@@ -358,15 +395,26 @@ const HeavyChart = defineAsyncComponent(() =>
 ### 动态 import + shallowRef
 
 ```typescript
-// ✅ GOOD: 条件加载组件
+// ✅ GOOD: 过期加载不得覆盖最新选择；组件外需由调用方停止 watcher
 const activeCom = shallowRef<Component>()
+const loadError = shallowRef<unknown>(null)
 
-watchEffect(async () => {
-  if (condition.value) {
-    const mod = await import('./HeavyComponent.vue')
-    activeCom.value = mod.default
-  } else {
+watchEffect(async (onCleanup) => {
+  let stale = false
+  onCleanup(() => { stale = true })
+  loadError.value = null
+  if (!condition.value) {
     activeCom.value = LightComponent
+    return
+  }
+  try {
+    const mod = await import('./HeavyComponent.vue')
+    if (!stale) activeCom.value = mod.default
+  } catch (error) {
+    if (!stale) {
+      loadError.value = error
+      activeCom.value = LightComponent
+    }
   }
 })
 ```
@@ -386,6 +434,8 @@ watchEffect(async () => {
 </template>
 ```
 
+> `Suspense` 在 Vue 3.5 仍是实验性 API，行为可能在次版本中调整。生产环境优先用 `defineAsyncComponent` + 显式 loading/error 状态；只有确认团队接受实验性 API 时再使用 Suspense。
+
 ---
 
 ## 6. v-once 与 v-memo
@@ -399,6 +449,8 @@ watchEffect(async () => {
 </template>
 ```
 
+> 只对真正静态、永不变化的内容使用。依赖响应式数据时，后续修改不会更新，容易造成“数据变了页面不变”的 bug。
+
 ### v-memo：条件记忆
 
 ```vue
@@ -409,6 +461,8 @@ watchEffect(async () => {
   </div>
 </template>
 ```
+
+> memo 的依赖数组必须覆盖**所有影响渲染的值**。如果同 `id` 的对象内容可能被替换（列表刷新、服务端返回值更新），`[item.id]` 会跳过必要更新；此时应把 `item` 版本号、更新时间等加入依赖，或不要使用 v-memo。
 
 ---
 
@@ -426,7 +480,11 @@ watchEffect(async () => {
 
 ### 虚拟列表
 
-当列表项超过 100 个时，使用虚拟滚动：
+当长列表渲染成为瓶颈时再引入虚拟滚动。先测量（Vue DevTools Performance / 浏览器 Performance 面板），再决定：
+
+- 100 个简单文本节点通常不需要虚拟滚动
+- 100 个复杂表单行可能已经明显卡顿
+- 列表项高度不固定、需要 SEO/打印时，虚拟列表的代价更高
 
 ```typescript
 // 推荐 vueuse/useVirtualList 或第三方库
@@ -445,6 +503,8 @@ const { list, containerProps, wrapperProps } = useVirtualList(
 ### 模板自动解包
 
 在模板中，`ref` 自动解包，不需要 `.value`：
+
+这里指模板渲染上下文的顶层绑定。普通对象内嵌 ref 并不普遍解包；reactive 数组/Map 中的 ref 元素也需要 `.value`。不要机械删除所有模板表达式中的 `.value`。
 
 ```vue
 <template>
@@ -518,7 +578,7 @@ scope.stop()
 
 ```typescript
 // composables/effects/useControlledEffects.ts
-import { effectScope, ref, watch } from 'vue'
+import { effectScope, nextTick, onScopeDispose, ref } from 'vue'
 
 export function useControlledEffects() {
   let scope: ReturnType<typeof effectScope> | null = effectScope()
@@ -537,7 +597,7 @@ export function useControlledEffects() {
     nextTick(() => (isActive.value = true))
   }
 
-  onBeforeUnmount(() => {
+  onScopeDispose(() => {
     scope?.stop()
     scope = null
   })
@@ -568,60 +628,105 @@ import { storeToRefs } from 'pinia'
 
 const store = useAppStore()
 
-// ✅ GOOD: storeToRefs 只提取响应式属性，不触发额外响应式包装
-const { theme, pure } = storeToRefs(store)
+// ✅ 保持响应式
+const { theme } = storeToRefs(store)
 
-// ❌ BAD: 解构丢失响应式
-const { theme, pure } = store // 失去响应式
+// ❌ 解构丢失响应式
+const { pure } = store
 
-// ❌ BAD: toRefs 对 store 实例做额外包装
-const { theme, pure } = toRefs(store) // 不必要，用 storeToRefs
+// ❌ 不必要：toRefs 会把 store 的 action 也一起包进来
+const { layout } = toRefs(store)
 ```
 
 ### 按需访问 Store 属性
 
 ```typescript
-// ✅ GOOD: computed 精确追踪
-const theme = computed(() => appStore.theme)
+// ✅ 只取当前组件需要的属性
+const { theme } = storeToRefs(store)
 
-// ❌ BAD: 解构整个 store 导致所有属性变化都触发重渲染
-const store = useAppStore()
-const { theme, pure, layout, ... } = storeToRefs(store) // 过度解构
+// ⚠️ 解构很多属性本身不是性能问题：
+// storeToRefs 只创建 ref，不会因为“解构了”就让组件订阅全部属性。
+// 只有模板/副作用里实际读取的属性才会被追踪。
+// 但如果模板/子组件根本不用，就没必要暴露。
+const { pure, layout } = storeToRefs(store)
 ```
 
 ---
 
-## 11. 性能检查清单
+## 11. SSR 边界
+
+SSR/Nuxt 项目里，下面这些写法会在服务端报错或产生 hydration 不一致：
+
+```typescript
+// ❌ setup 期间直接访问浏览器全局
+const width = ref(window.innerWidth)
+const isOnline = ref(navigator.onLine)
+const token = localStorage.getItem('token')
+```
+
+```typescript
+// ✅ 两端首次渲染使用相同值，挂载后再读取浏览器 API
+import { onMounted, ref } from 'vue'
+
+const width = ref(0)
+onMounted(() => {
+  width.value = window.innerWidth
+})
+```
+
+```typescript
+// ✅ 网络状态也先保持两端初始值一致
+import { onMounted, ref } from 'vue'
+
+const isOnline = ref(true)
+onMounted(() => {
+  isOnline.value = navigator.onLine
+})
+```
+
+仅判断 `typeof window` / `typeof navigator` 可以避免服务端报错，但客户端 setup 立即读取真实值时，仍可能与服务端默认值不同。模板依赖这些值时，应在挂载后更新，或将相关 UI 限定为客户端渲染。以上代码只展示首次同步；持续监听还需注册事件并清理。
+
+检查清单：
+
+- [ ] `window`、`document`、`navigator`、`localStorage` 访问有环境判断或放在 `onMounted`
+- [ ] 首屏渲染不依赖随机数、时间戳、浏览器宽度等不稳定值，避免 hydration mismatch
+- [ ] Pinia 使用请求级实例，不用全局单例
+- [ ] 第三方库（ECharts、Monaco、地图）只在客户端初始化，并用 `markRaw`/`shallowRef`
+
+## 12. 性能检查清单
+
 
 ### 组件级
 
-- [ ] 大型数据使用 `shallowRef` 而非 `ref`
+- [ ] 确认不需要深层修改时，大型数据使用 `shallowRef` 而非 `ref`
 - [ ] 动态组件使用 `shallowRef`
-- [ ] 派生状态用 `computed`，不用方法
+- [ ] 需要响应式派生与缓存时用 `computed`；普通事件计算可用方法
 - [ ] 避免在 `computed` 中产生副作用
 - [ ] 列表使用唯一 `key`
 - [ ] 重型组件懒加载
-- [ ] 非响应式对象使用 `markRaw` 标记
+- [ ] 只对可能进入响应式图且不应被代理的对象使用 `markRaw`
+- [ ] `v-memo` 的依赖覆盖所有影响渲染的值，不滥用
 
 ### 副作用清理
 
-- [ ] 事件监听器在 `onUnmounted` 中移除
-- [ ] 定时器在 `onUnmounted` 中清除
+- [ ] 事件监听器在 `onScopeDispose`（或 `onUnmounted`）中移除
+- [ ] 定时器在 `onScopeDispose`（或 `onUnmounted`）中清除
 - [ ] 异步请求使用 `AbortController` 或 watcher cleanup 取消过期请求
 - [ ] `watch` 返回的 `stop` 函数在适当时机调用
-- [ ] `watchEffect` 中使用 `onWatcherCleanup()` 清理异步请求（3.5+）
+- [ ] 清理在资源创建时尽早注册；`onWatcherCleanup()` 必须在 watcher 同步执行期调用
+- [ ] keep-alive 页面明确 `onActivated` / `onDeactivated` 的暂停/恢复契约
 
 ### Store 使用
 
-- [ ] 组件内用 `useXxxStore()`，组件外显式传入 `pinia` 或沿用项目的 `useXxxStoreWithOut()` 封装
+- [ ] 组件内用 `useXxxStore()`；组件外显式传入 `pinia`；仅项目已有约定时用 `useXxxStoreWithOut()`
 - [ ] 解构 store 用 `storeToRefs`
 - [ ] 避免深层 `watch` store
-- [ ] 不暴露整个 store 实例
+- [ ] 返回接口符合调用方职责，不为简单 store 读写强行增加桥接
 
 ### 响应式选择
 
 - [ ] 基本类型用 `ref`
 - [ ] 不需要深层响应的大型对象用 `shallowRef`
-- [ ] 需要旧值对比用 `watch`，否则用 `watchEffect`
-- [ ] 模板中不加 `.value`
+- [ ] 需要显式限定依赖或旧值时用 `watch`；依赖适合自动收集时用 `watchEffect`
+- [ ] 区分模板顶层 ref 解包与嵌套对象/集合中的 ref
 - [ ] 多个 composable 需统一生命周期管理时考虑 `effectScope`

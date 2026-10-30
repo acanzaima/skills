@@ -45,13 +45,8 @@ function findMarkdownLinks(text) {
   let match
 
   while ((match = regex.exec(text))) {
-    const target = match[1].split('#')[0]
-    if (
-      target &&
-      !target.includes('://') &&
-      !target.startsWith('mailto:') &&
-      !target.startsWith('#')
-    ) {
+    const target = match[1]
+    if (target && !target.includes('://') && !target.startsWith('mailto:')) {
       links.push(target)
     }
   }
@@ -59,14 +54,58 @@ function findMarkdownLinks(text) {
   return links
 }
 
+function slugifyHeading(text) {
+  return text
+    .trim()
+    .toLowerCase()
+    .replace(/<[^>]*>/g, '')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/[`*_~]/g, '')
+    .replace(/[^\p{L}\p{N}\s-]/gu, '')
+    .replace(/\s+/g, '-')
+}
+
+const anchorCache = new Map()
+
+function collectAnchors(file) {
+  if (anchorCache.has(file)) return anchorCache.get(file)
+
+  const anchors = new Set()
+  let inFence = false
+
+  for (const line of readText(file).replace(/\r\n/g, '\n').split('\n')) {
+    if (/^\s*```/.test(line)) {
+      inFence = !inFence
+      continue
+    }
+    if (inFence) continue
+
+    const match = line.match(/^#{1,6}\s+(.*)$/)
+    if (match) anchors.add(slugifyHeading(match[1]))
+  }
+
+  anchorCache.set(file, anchors)
+  return anchors
+}
+
 function checkLocalLinks(file) {
   const text = readText(file)
   const baseDir = path.dirname(file)
 
   for (const target of findMarkdownLinks(text)) {
-    const resolved = path.resolve(baseDir, target)
+    const [pathPart, rawAnchor] = target.split('#')
+    const resolved = path.resolve(baseDir, pathPart || path.basename(file))
+
     if (!existsSync(resolved)) {
       fail(`${path.relative(root, file)} links to missing file: ${target}`)
+      continue
+    }
+
+    if (!rawAnchor || !resolved.endsWith('.md')) continue
+
+    const anchor = decodeURIComponent(rawAnchor)
+    if (!collectAnchors(resolved).has(anchor)) {
+      fail(`${path.relative(root, file)} links to missing anchor: ${target}`)
     }
   }
 }

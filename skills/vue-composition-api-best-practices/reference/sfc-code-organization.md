@@ -12,6 +12,8 @@ tags: [vue3, composition-api, script-setup, code-organization, maintainability]
 
 ## 任务清单
 
+**B 层项目约定**：以下顺序仅在项目采用该约定或用户要求结构重构时适用。无约定时按逻辑邻近组织同样正确；优先保证初始化依赖，再考虑排列。
+
 - [ ] 遵循标准的 SFC 代码组织顺序
 - [ ] 使用 useXxx 函数按功能分组相关代码
 - [ ] 将 Vue 公共项（options、props、emits 等）放在顶部
@@ -75,7 +77,8 @@ provide('theme', theme)
 
 ```vue
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, provide, inject } from 'vue'
+import { ref, computed, watch, provide, inject, onScopeDispose } from 'vue'
+import { THEME_KEY, CONFIG_KEY } from '@/types/injection-keys'
 
 // 组件名
 defineOptions({
@@ -90,8 +93,8 @@ const props = defineProps<{
 // model
 const model = defineModel<string>()
 
-// inject
-const globalConfig = inject('config')
+// inject（使用 InjectionKey；字符串 key 会失去类型）
+const config = inject(CONFIG_KEY, { apiUrl: '/api' })
 
 // emits
 const emit = defineEmits<{
@@ -109,7 +112,7 @@ const { theme, toggleTheme } = useTheme()
 const { count, doubleCount, increment } = useCounter()
 
 // provide
-provide('theme', theme)
+provide(THEME_KEY, theme)
 
 // expose
 defineExpose({
@@ -124,22 +127,34 @@ function useUser() {
   const user = ref<User | null>(null)
   const loading = ref(false)
 
+  const error = ref<unknown>(null)
+  let requestId = 0
+  let disposed = false
+  onScopeDispose(() => { disposed = true; requestId++ })
+
   const fetchUser = async () => {
+    if (disposed) return
+    const current = ++requestId
     loading.value = true
+    error.value = null
     try {
-      user.value = await fetchUserData(props.id)
+      const result = await fetchUserData(props.id)
+      if (current === requestId) user.value = result
+    } catch (cause) {
+      if (current === requestId) error.value = cause
     } finally {
-      loading.value = false
+      if (current === requestId) loading.value = false
     }
   }
 
+  // 只保留一个初始加载路径，避免 watch immediate + onMounted 各拉一次
   watch(() => props.id, fetchUser, { immediate: true })
-  onMounted(fetchUser)
 
   return {
     user,
     loading,
-    fetchUser
+    fetchUser,
+    error
   }
 }
 
@@ -181,7 +196,7 @@ function useCounter() {
 
 | 顺序 | 区块 | 是否必须 | 描述 |
 |-------|---------|----------|-------------|
-| 1 | `defineOptions` | ✅ 推荐 | 组件名称（DevTools、keep-alive、递归组件） |
+| 1 | `defineOptions` | 可选 | 需要稳定组件名时（3.3+；3.2.34+ 可按文件名推断） |
 | 2 | `defineProps` | 可选 | 带类型声明的组件 props |
 | 3 | `defineModel` | 可选 | 双向绑定 model（Vue 3.4+） |
 | 4 | `inject` | 可选 | 注入的依赖 |
@@ -247,7 +262,9 @@ const { search, results } = useSearch()
 function useSearch() { /* ... */ }
 ```
 
-## 收益
+## 收益与代价
+
+**收益：**
 
 1. **结构可预测**：团队成员知道在哪里找到特定代码
 2. **快速概览**：顶部区域让组件接口一目了然
@@ -256,12 +273,40 @@ function useSearch() { /* ... */ }
 5. **依赖清晰**：一眼看清每个功能返回和消费了什么
 6. **Store 聚合**：所有 store 实例集中声明，便于识别
 
-## 适用场景
+**代价：**
 
-- **始终遵循**：对所有 `<script setup>` 组件使用此组织方式
-- **小型组件**：即使区块较少，仍应遵循此顺序
-- **大型组件**：功能较多时，对保持可读性至关重要
-- **团队项目**：通过代码审查和 lint 规则强制保持一致性
+1. 额外的函数调用和返回值，简单功能可能变得更绕
+2. 顶部声明与底部实现分离，阅读时需要跳转
+3. 如果 feature 函数依赖闭包而不是参数，依赖关系仍然隐式
+4. 对小组件来说，11 个区块的注释成本可能高于收益
+
+## 适用场景与边界
+
+- **中大型组件/复杂页面**：按此顺序组织，收益最大
+- **小型组件（单一职责、区块很少）**：按逻辑邻近组织即可，不必为了凑满 11 步增加包装
+- **团队项目**：可以用评审和规则保持一致性，但不要用“文件行数”或“函数数量”直接决定拆分
+- **陌生项目**：先确认团队已有约定并优先沿用；新项目、尚无约定的模块，或用户明确要求时，可按职责和复杂度选用。局部修复不顺带重排结构
+
+> 这条 11 步顺序是**项目约定**。重排运行时声明会影响立即执行的 watcher、初始化依赖和暂时性死区，不能机械排序。宏顺序可用 `vue/define-macros-order` 约束；业务区块分类仍需评审，其他语义 lint 见[维护策略](maintenance-strategy.md#自动检查的边界)。
+
+**拆分的判断依据**（比数字可靠）：
+- 是否形成独立职责（状态、派生、副作用能否自包含）
+- 是否被多个组件复用，或需要独立测试
+- 拆分后是否降低理解成本、减少跨块跳转
+- 是否改变请求次数、初始化时序或清理时机
+
+行数、`useXxx` 数量只能作为“触发检查”的信号，不能直接作为架构规则。
+
+**按场景的默认做法：**
+
+| 场景 | 更合适的默认做法 |
+|------|------------------|
+| 小型组件、单一功能 | 直接按逻辑邻近组织，不为排序或分组增加包装 |
+| 中型业务页面 | 职责边界清楚时使用局部 `useXxx` |
+| 大型业务页面 | 综合拆分子组件、领域 composable 和页面编排，而不只是增加函数数量 |
+| 多组件复用或需要独立测试 | 提取到外部文件，明确输入、输出和副作用 |
+| 简单 store 读写 | 直接使用 store，不默认增加桥接层 |
+| 跨 store 协作、页面专属组合逻辑 | 再考虑 composable 编排或 Store 桥接 |
 
 ## 真实案例
 
@@ -332,7 +377,7 @@ function useSearchInput() {
 </script>
 ```
 
-> **大型组件提示**：当 `useXxx` 超过 8 个时，声明区的依赖传参会变得冗长。参考[跨功能依赖 - 模式 6](cross-feature-dependencies.md#模式-6页面级编排混合策略)的混合策略：核心数据链走显式参数注入，叶子函数可容忍闭包，避免声明区沦为样板代码的海洋。
+> **大型组件提示**：当 `useXxx` 较多时，声明区的依赖传参会变得冗长。参考[跨功能依赖 - 模式 6](cross-feature-dependencies.md#模式-6页面级编排混合策略)的混合策略：核心数据链走显式参数注入，叶子函数可容忍闭包，避免声明区沦为样板代码的海洋。数量只是提醒信号，不是拆分依据。
 
 ## 参考
 
